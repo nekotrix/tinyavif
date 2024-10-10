@@ -185,9 +185,9 @@ fn pack_avif(av1_data: &[u8], width: usize, height: usize) -> Box<[u8]> {
 }
 
 fn main() {
-  let width = 512;
-  let height = 512;
-  let qindex = 255;
+  let width = 256;
+  let height = 256;
+  let qindex = 121;
 
   // Generate AV1 data
   let encoder = AV1Encoder::new(width, height, qindex);

@@ -134,14 +134,79 @@ impl<'a> TileEncoder<'a> {
   }
 
   fn encode_superblock(&mut self, sb_row: usize, sb_col: usize) {
-    // decode_partition at size 64x64
+    let mi_row = sb_row * 16;
+    let mi_col = sb_col * 16;
+    self.encode_partition(mi_row, mi_col, 64);
+  }
 
-    // For partition, the context depends on the above and left partition sizes and
-    // how they compare to the current partition size, defaulting to the max size
-    // if those aren't present.
-    // As we always use 64x64 partitions, this context is always 0
-    // partition = PARTITION_NONE
-    self.bitstream.write_symbol(0, &[20137, 21547, 23078, 29566, 29837, 30261, 30524, 30892, 31724]);
+  fn encode_partition(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
+    // Always split down to 8x8 blocks
+    // For each partition symbol, the context depends on whether the above and/or left
+    // blocks are partitioned to a size smaller than what we're currently considering.
+    // For blocks at one of the frame edges, the missing neighbour is assumed to be
+    // the maximum possible size.
+    //
+    // Because we always split down to the same size, this ends up implying that the
+    // context is:
+    //
+    // Current partition is 8x8: context = 0
+    // Otherwise:
+    //   Top-left corner: context = 0
+    //   Left edge: context = 1
+    //   Top edge: context = 2
+    //   Everywhere else: context = 3
+    if bsize == 8 {
+      let cdf = [19132, 25510, 30392];
+      self.bitstream.write_symbol(0, &cdf); // PARTITION_NONE
+      self.encode_block(mi_row, mi_col, bsize);
+    } else {
+      let all_cdfs = [
+        // 16x16
+        [
+          [15597, 20929, 24571, 26706, 27664, 28821, 29601, 30571, 31902],
+          [7925, 11043, 16785, 22470, 23971, 25043, 26651, 28701, 29834],
+          [5414, 13269, 15111, 20488, 22360, 24500, 25537, 26336, 32117],
+          [2662, 6362, 8614, 20860, 23053, 24778, 26436, 27829, 31171]
+        ],
+        // 32x32
+        [
+          [18462, 20920, 23124, 27647, 28227, 29049, 29519, 30178, 31544],
+          [7689, 9060, 12056, 24992, 25660, 26182, 26951, 28041, 29052],
+          [6015, 9009, 10062, 24544, 25409, 26545, 27071, 27526, 32047],
+          [1394, 2208, 2796, 28614, 29061, 29466, 29840, 30185, 31899]
+        ],
+        // 64x64
+        [
+          [20137, 21547, 23078, 29566, 29837, 30261, 30524, 30892, 31724],
+          [6732, 7490, 9497, 27944, 28250, 28515, 28969, 29630, 30104],
+          [5945, 7663, 8348, 28683, 29117, 29749, 30064, 30298, 32238],
+          [870, 1212, 1487, 31198, 31394, 31574, 31743, 31881, 32332]
+        ]
+      ];
+      let bsize_ctx = match bsize {
+        16 => 0,
+        32 => 1,
+        64 => 2,
+        _ => panic!("Reached an unexpected partition size")
+      };
+      let above_ctx = if mi_row > 0 { 1 } else { 0 };
+      let left_ctx = if mi_col > 0 { 1 } else { 0 };
+      let ctx = 2 * left_ctx + above_ctx;
+
+      let cdf = &all_cdfs[bsize_ctx][ctx];
+      self.bitstream.write_symbol(3, cdf); // PARTITION_SPLIT
+
+      let offset = bsize / 8;
+      for i in 0..2 {
+        for j in 0..2 {
+          self.encode_partition(mi_row + i*offset, mi_col + j*offset, bsize/2);
+        }
+      }
+    }
+  }
+
+  fn encode_block(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
+    assert!(bsize == 8);
 
     // For skip, the context depends on the above and left skip flags,
     // defaulting to false if those aren't present
@@ -156,10 +221,11 @@ impl<'a> TileEncoder<'a> {
     self.bitstream.write_symbol(0, &[15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466]);
 
     // For uv_mode, the context is simply y_mode combined with whether CFL is allowed
-    // Here the y mode is always DC_PRED and CFL is never valid for 64x64 blocks
-    // uv_mode = DC_PRED
-    self.bitstream.write_symbol(0, &[22631, 24152, 25378, 25661, 25986, 26520, 27055, 27923, 28244, 30059, 30941, 31961]);
-  
+    // Here the y mode is always DC_PRED and CFL is always allowed for 8x8 blocks,
+    // so we always end up with the same context
+    // uv_mode(context=0, CFL allowed) = DC_PRED
+    self.bitstream.write_symbol(0, &[10407, 11208, 12900, 13181, 13823, 14175, 14899, 15656, 15986, 20086, 20995, 22455, 24212]);
+
     // Transform type and coefficients per plane
     //
     // Note on contexts:
@@ -174,7 +240,7 @@ impl<'a> TileEncoder<'a> {
     // this means that it depends on the frame-level base_qindex.
     //
     // Then three other, more dynamic, values are factored into the context:
-    // * Transform size, which in this case is 4 (64x64) for luma and 3 (32x32) for chroma
+    // * Transform size, which in this case is 1 (8x8) for luma and 0 (4x4) for chroma
     // * Whether the current plane is luma or chroma (the "plane type")
     // * Surrounding coefficient values
     // The last two are bundled together in a complex way into a value we'll call
@@ -184,22 +250,30 @@ impl<'a> TileEncoder<'a> {
     // For luma, for the all_zero symbol, the main context in theory has a complex dependency
     // on the nearby transform coefficients, but it's short-circuited to always be 0 for
     // max-size transforms (ie, transform size == block size), which saves us a lot of work!
-    // all_zero(y, context=3,4,0) = 0
-    self.bitstream.write_symbol(0, &[31539]); 
+    // all_zero(y, context=3,1,0) = 0
+    self.bitstream.write_symbol(0, &[31903]);
 
-    // We don't need to signal a transform type, as the only valid type for 64x64 is DCT_DCT
+    // Transform type
+    // As we selected the reduced transform set in the frame header,
+    // we end up looking at the TX_SET_INTRA_2 set, which consists of
+    // { IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST }, in that order.
+    // We want DCT_DCT, so we want to encode index 1.
+    // The context here consists of the TX size (rounded down to a square size,
+    // but 8x8 is already square) and the intra mode, which here is always DC_PRED
+    self.bitstream.write_symbol(1, &[6554, 13107, 19661, 26214]);
 
     // Number of coefficients, encoded as a logarithmic class + value within that class
-    // Here, the main context consists of the plane type, and *for 16x16 and smaller*
-    // on whether this is a 1D or a 2D transform. For 64x64, it's always 2D.
-    // eob_pt_1024(context=3,0) = 0, meaning 1 transform coefficient is present
-    self.bitstream.write_symbol(0, &[6698, 8334, 11961, 15762, 20186, 23862, 27434, 29326, 31082, 32050]);
+    // Here, the contexts are qindex, plane type, and (for 16x16 and smaller)
+    // whether the selected transform type is 1D (last context = 1) or 2D
+    // (last context = 0). We always choose DCT_DCT, which counts as a 2D transform
+    // eob_pt_64(context=3,0,0) = 0, meaning 1 transform coefficient is present
+    self.bitstream.write_symbol(0, &[6307, 7541, 12060, 16358, 22553, 27865]);
 
     // Base range of the single coefficient
     // There is a designated context for "the sole coefficient in a 1-coeff block",
     // so this ends up always being the main context
-    // coeff_base_eob(context=3,4,0,0) = 1, meaning |quantized coefficient| = 2
-    self.bitstream.write_symbol(1, &[12358, 24977]);
+    // coeff_base_eob(context=3,1,0,0) = 1, meaning |quantized coefficient| = 1
+    self.bitstream.write_symbol(0, &[21457, 31043]);
 
     // Sign of the single coefficient
     // This is the one case where we need to (pretend to) track state even for this simple case
@@ -213,14 +287,14 @@ impl<'a> TileEncoder<'a> {
       [128 * 102],
       [128 * 147]
     ];
-    let y_dc_sign_ctx = if sb_row == 0 && sb_col == 0 { 0 } else { 2 };
+    let y_dc_sign_ctx = if mi_row == 0 && mi_col == 0 { 0 } else { 2 };
     self.bitstream.write_symbol(0, &y_dc_sign_cdf[y_dc_sign_ctx]);
   
     // For chroma, we don't signal any coefficients for now
     // This ends up meaning that the main context is always 7
-    // all_zero(u, context=3,3,7) = 1
-    self.bitstream.write_symbol(1, &[4656]);
-    // all_zero(v, context=3,3,7) = 1
-    self.bitstream.write_symbol(1, &[4656]);
+    // all_zero(u, context=3,0,7) = 1
+    self.bitstream.write_symbol(1, &[2713]);
+    // all_zero(v, context=3,0,7) = 1
+    self.bitstream.write_symbol(1, &[2713]);
   }
 }
