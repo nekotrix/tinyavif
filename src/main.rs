@@ -113,12 +113,44 @@ fn encode_image(width: usize, height: usize, qindex: u8) -> Box<[u8]> {
   // decode_partition at size 64x64
   // partition(width=64, context=0) = PARTITION_NONE
   e.write_symbol(0, &[20137, 21547, 23078, 29566, 29837, 30261, 30524, 30892, 31724]);
-  // skip(context=0) = 1
-  e.write_symbol(1, &[31671]);
+  // skip(context=0) = 0
+  e.write_symbol(0, &[31671]);
   // intra_frame_y_mode(context=0,0) = DC_PRED
   e.write_symbol(0, &[15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466]);
   // uv_mode(context=0, cfl disallowed) = DC_PRED
   e.write_symbol(0, &[22631, 24152, 25378, 25661, 25986, 26520, 27055, 27923, 28244, 30059, 30941, 31961]);
+
+  // Residual coeffs per plane (iff skip == 0)
+  // Note on contexts:
+  // Coeff symbols have an implicit qindex-based context, which is:
+  //  if   qindex <= 20  then qctx = 0
+  //  elif qindex <= 60  then qctx = 1
+  //  elif qindex <= 120 then qctx = 2
+  //  else                    qctx = 3 (this is the selected qindex for now)
+  //
+  // This context is selected at each past-independent frame, and then held
+  // across any dependent frames. In our case, where every frame is a key frame,
+  // this means that the qindex used is the frame-level base_qindex.
+  //
+  // Then there is a tx-size based context, which in this case is 4 (64x64) for luma
+  // and 3 (32x32) for chroma.
+  // And finally a context which depends on what coefficients existed in
+  // surrounding blocks (which for now are irrelevant) and the plane
+  assert!(qindex > 120);
+  // all_zero(y, context=3,4,0) = 0
+  e.write_symbol(0, &[31539]); 
+  // [tx type forced to be DCT_DCT as txfm is 64x64]
+  // eob_pt_1024(context=3,0,0) = 0, meaning 1 transform coefficient is present
+  e.write_symbol(0, &[6698, 8334, 11961, 15762, 20186, 23862, 27434, 29326, 31082, 32050]);
+  // coeff_base_eob(context=3,4,0,0) = 0, meaning |quantized coefficient| = 1
+  e.write_symbol(0, &[12358, 24977]);
+  // dc_sign(context=3,0,0) = 0, meaning quantized coefficient = +1
+  e.write_symbol(0, &[16000]);
+
+  // all_zero(u, context=3,3,7) = 1
+  e.write_symbol(1, &[4656]);
+  // all_zero(v, context=3,3,7) = 1
+  e.write_symbol(1, &[4656]);
 
   return e.finalize();
 }
