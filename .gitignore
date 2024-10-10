@@ -1,4 +1,5 @@
 /target
 *.avif
 *.obu
+*.png
 *.y4m

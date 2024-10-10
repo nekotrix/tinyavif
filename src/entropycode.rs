@@ -33,7 +33,7 @@ impl EntropyWriter {
       } else {
         // Carry stops here
         self.data[i] += 1;
-        break;
+        return;
       }
     }
     // If we get here, the carry tried to propagate beyond the first byte of the

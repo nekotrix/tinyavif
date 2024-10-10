@@ -122,22 +122,46 @@ impl AV1Encoder {
 }
 
 impl<'a> TileEncoder<'a> {
-  fn encode(&mut self) {
-    // Temporary: Encode a fixed 64x64 image
-    assert!(self.encoder.width == 64);
-    assert!(self.encoder.height == 64);
+  pub fn encode(&mut self) {
+    let sb_cols = self.encoder.width.div_ceil(64);
+    let sb_rows = self.encoder.height.div_ceil(64);
 
+    for sb_row in 0..sb_rows {
+      for sb_col in 0..sb_cols {
+        self.encode_superblock(sb_row, sb_col);
+      }
+    }
+  }
+
+  fn encode_superblock(&mut self, sb_row: usize, sb_col: usize) {
     // decode_partition at size 64x64
-    // partition(width=64, context=0) = PARTITION_NONE
+
+    // For partition, the context depends on the above and left partition sizes and
+    // how they compare to the current partition size, defaulting to the max size
+    // if those aren't present.
+    // As we always use 64x64 partitions, this context is always 0
+    // partition = PARTITION_NONE
     self.bitstream.write_symbol(0, &[20137, 21547, 23078, 29566, 29837, 30261, 30524, 30892, 31724]);
-    // skip(context=0) = 0
+
+    // For skip, the context depends on the above and left skip flags,
+    // defaulting to false if those aren't present
+    // As we always set skip = false, this context is always 0
+    // skip = false
     self.bitstream.write_symbol(0, &[31671]);
+  
+    // For intra_frame_y_mode, the context depends on the above and left Y modes,
+    // defaulting to DC_PRED if those aren't present
+    // As we always choose DC_PRED, this context is always 0
     // intra_frame_y_mode(context=0,0) = DC_PRED
     self.bitstream.write_symbol(0, &[15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466]);
-    // uv_mode(context=0, cfl disallowed) = DC_PRED
+
+    // For uv_mode, the context is simply y_mode combined with whether CFL is allowed
+    // Here the y mode is always DC_PRED and CFL is never valid for 64x64 blocks
+    // uv_mode = DC_PRED
     self.bitstream.write_symbol(0, &[22631, 24152, 25378, 25661, 25986, 26520, 27055, 27923, 28244, 30059, 30941, 31961]);
   
-    // Residual coeffs per plane (iff skip == 0)
+    // Transform type and coefficients per plane
+    //
     // Note on contexts:
     // Coeff symbols have an implicit qindex-based context, which is:
     //  if   qindex <= 20  then qctx = 0
@@ -147,23 +171,53 @@ impl<'a> TileEncoder<'a> {
     //
     // This context is selected at each past-independent frame, and then held
     // across any dependent frames. In our case, where every frame is a key frame,
-    // this means that the qindex used is the frame-level base_qindex.
+    // this means that it depends on the frame-level base_qindex.
     //
-    // Then there is a tx-size based context, which in this case is 4 (64x64) for luma
-    // and 3 (32x32) for chroma.
-    // And finally a context which depends on what coefficients existed in
-    // surrounding blocks (which for now are irrelevant) and the plane
+    // Then three other, more dynamic, values are factored into the context:
+    // * Transform size, which in this case is 4 (64x64) for luma and 3 (32x32) for chroma
+    // * Whether the current plane is luma or chroma (the "plane type")
+    // * Surrounding coefficient values
+    // The last two are bundled together in a complex way into a value we'll call
+    // the "main context"
     assert!(self.encoder.qindex > 120);
+
+    // For luma, for the all_zero symbol, the main context in theory has a complex dependency
+    // on the nearby transform coefficients, but it's short-circuited to always be 0 for
+    // max-size transforms (ie, transform size == block size), which saves us a lot of work!
     // all_zero(y, context=3,4,0) = 0
     self.bitstream.write_symbol(0, &[31539]); 
-    // [tx type forced to be DCT_DCT as txfm is 64x64]
-    // eob_pt_1024(context=3,0,0) = 0, meaning 1 transform coefficient is present
+
+    // We don't need to signal a transform type, as the only valid type for 64x64 is DCT_DCT
+
+    // Number of coefficients, encoded as a logarithmic class + value within that class
+    // Here, the main context consists of the plane type, and *for 16x16 and smaller*
+    // on whether this is a 1D or a 2D transform. For 64x64, it's always 2D.
+    // eob_pt_1024(context=3,0) = 0, meaning 1 transform coefficient is present
     self.bitstream.write_symbol(0, &[6698, 8334, 11961, 15762, 20186, 23862, 27434, 29326, 31082, 32050]);
-    // coeff_base_eob(context=3,4,0,0) = 0, meaning |quantized coefficient| = 1
-    self.bitstream.write_symbol(0, &[12358, 24977]);
-    // dc_sign(context=3,0,0) = 0, meaning quantized coefficient = +1
-    self.bitstream.write_symbol(0, &[16000]);
+
+    // Base range of the single coefficient
+    // There is a designated context for "the sole coefficient in a 1-coeff block",
+    // so this ends up always being the main context
+    // coeff_base_eob(context=3,4,0,0) = 1, meaning |quantized coefficient| = 2
+    self.bitstream.write_symbol(1, &[12358, 24977]);
+
+    // Sign of the single coefficient
+    // This is the one case where we need to (pretend to) track state even for this simple case
+    // The DC sign context depends on whether there are more +ve signs, more -ve signs,
+    // or an equal number, among all above and left 4x4 units.
+    // In our case, the first transform block has 0 +ve and 0 -ve signs nearby,
+    // so uses context 0, while all others have more +ves than -ves and so use context 2.
+    // dc_sign(context=3,0,N) = 0, meaning quantized coefficient is +ve
+    let y_dc_sign_cdf = [
+      [128 * 125],
+      [128 * 102],
+      [128 * 147]
+    ];
+    let y_dc_sign_ctx = if sb_row == 0 && sb_col == 0 { 0 } else { 2 };
+    self.bitstream.write_symbol(0, &y_dc_sign_cdf[y_dc_sign_ctx]);
   
+    // For chroma, we don't signal any coefficients for now
+    // This ends up meaning that the main context is always 7
     // all_zero(u, context=3,3,7) = 1
     self.bitstream.write_symbol(1, &[4656]);
     // all_zero(v, context=3,3,7) = 1
