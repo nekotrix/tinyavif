@@ -1,5 +1,8 @@
+use bytemuck::Zeroable;
+
 use crate::bitcode::BitWriter;
 use crate::entropycode::EntropyWriter;
+use crate::array_2d::Array2D;
 
 // Top-level encoder state
 pub struct AV1Encoder {
@@ -8,10 +11,23 @@ pub struct AV1Encoder {
   qindex: u8
 }
 
+// "Mode info" unit - a struct representing the state of a single 4x4 luma pixel unit.
+// The values in here can be used as contexts when encoding later blocks
+#[derive(Zeroable)]
+pub struct ModeInfo {
+  // Sign of the DC coefficient in this block
+  // This is stored differently to what the spec says: we store
+  // -1 if the DC coefficient is negative, 0 if zero, 1 if positive.
+  // This way, we can compare the number of nearby +ve and -ve DC coefficients by
+  // simply summing this value over nearby blocks.
+  dc_sign: i8,
+}
+
 // Mutable state used while encoding a single tile
 pub struct TileEncoder<'a> {
   encoder: &'a AV1Encoder,
-  bitstream: EntropyWriter
+  bitstream: EntropyWriter,
+  mode_info: Array2D<ModeInfo>
 }
 
 impl AV1Encoder {
@@ -111,9 +127,13 @@ impl AV1Encoder {
 
   pub fn encode_image(&self) -> Box<[u8]> {
     // Encode a single tile for now
+    let mi_rows = self.width.div_ceil(4);
+    let mi_cols = self.height.div_ceil(4);
+
     let mut tile = TileEncoder {
       encoder: &self,
-      bitstream: EntropyWriter::new()
+      bitstream: EntropyWriter::new(),
+      mode_info: Array2D::zeroed(mi_rows, mi_cols)
     };
 
     tile.encode();

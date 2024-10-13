@@ -4,6 +4,7 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+mod array_2d;
 mod av1_encoder;
 mod bitcode;
 mod entropycode;
