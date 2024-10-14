@@ -1,26 +1,42 @@
 use bytemuck::Zeroable;
 
-use crate::bitcode::BitWriter;
-use crate::entropycode::EntropyWriter;
 use crate::array_2d::Array2D;
+use crate::bitcode::BitWriter;
+use crate::consts::*;
+use crate::entropycode::EntropyWriter;
+use crate::util::*;
 
 // Top-level encoder state
 pub struct AV1Encoder {
+  // Size used for encoding - always padded to a multiple of 8x8 luma pixels
   width: usize,
   height: usize,
+
+  // Original image size
+  crop_width: usize,
+  crop_height: usize,
+
   qindex: u8
 }
 
 // "Mode info" unit - a struct representing the state of a single 4x4 luma pixel unit.
 // The values in here can be used as contexts when encoding later blocks
-#[derive(Zeroable)]
+#[derive(Zeroable, Clone)]
 pub struct ModeInfo {
-  // Sign of the DC coefficient in this block
+  // "Level context" for each plane
+  // This is the sum of absolute values of the coefficients in each block,
+  // capped at 63, and is used as part of the context for coefficient sizes
+  //
+  // Note: As we don't use transform partitioning, this is never actually
+  // used for luma in this encoder. But it is required for chroma.
+  level_ctx: [u8; 3],
+
+  // Sign of the DC coefficient for each plane
   // This is stored differently to what the spec says: we store
   // -1 if the DC coefficient is negative, 0 if zero, 1 if positive.
   // This way, we can compare the number of nearby +ve and -ve DC coefficients by
   // simply summing this value over nearby blocks.
-  dc_sign: i8,
+  dc_sign: [i8; 3],
 }
 
 // Mutable state used while encoding a single tile
@@ -31,17 +47,22 @@ pub struct TileEncoder<'a> {
 }
 
 impl AV1Encoder {
-  pub fn new(width: usize, height: usize, qindex: u8) -> Self {
+  pub fn new(crop_width: usize, crop_height: usize, qindex: u8) -> Self {
     // Check limits imposed by AV1
-    assert!(0 < width && width <= 65536);
-    assert!(0 < height && height <= 65536);
+    assert!(0 < crop_width && crop_width <= 65536);
+    assert!(0 < crop_height && crop_height <= 65536);
 
     // We don't currently support lossless mode
     assert!(qindex != 0);
 
+    let width = crop_width.next_multiple_of(8);
+    let height = crop_height.next_multiple_of(8);
+
     Self {
       width: width,
       height: height,
+      crop_width: crop_width,
+      crop_height: crop_height,
       qindex: qindex
     }
   }
@@ -105,7 +126,7 @@ impl AV1Encoder {
   
     w.write_bits(self.qindex as u64, 8);
   
-    w.write_bits(0, 3); // No frame-level delta-qs (one bit per channel)
+    w.write_bits(0, 3); // No frame-level delta-qs (three bits: Y DC, UV DC, UV AC)
     w.write_bit(0); // Don't use quantizer matrices
     w.write_bit(0); // No segmentation
     w.write_bit(0); // No superblock-level delta-q (=> no superblock-level delta-lf)
@@ -127,8 +148,10 @@ impl AV1Encoder {
 
   pub fn encode_image(&self) -> Box<[u8]> {
     // Encode a single tile for now
-    let mi_rows = self.width.div_ceil(4);
-    let mi_cols = self.height.div_ceil(4);
+
+    // Allocate MI array
+    let mi_rows = self.width / 4;
+    let mi_cols = self.height / 4;
 
     let mut tile = TileEncoder {
       encoder: &self,
@@ -225,29 +248,82 @@ impl<'a> TileEncoder<'a> {
     }
   }
 
-  fn encode_block(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
-    assert!(bsize == 8);
+  fn dc_sign_ctx(&self, plane: usize, mi_row: usize, mi_col: usize, bsize: usize) -> usize {
+    if plane != 0 {
+      todo!();
+    }
 
-    // For skip, the context depends on the above and left skip flags,
-    // defaulting to false if those aren't present
-    // As we always set skip = false, this context is always 0
-    // skip = false
-    self.bitstream.write_symbol(0, &[31671]);
-  
-    // For intra_frame_y_mode, the context depends on the above and left Y modes,
-    // defaulting to DC_PRED if those aren't present
-    // As we always choose DC_PRED, this context is always 0
-    // intra_frame_y_mode(context=0,0) = DC_PRED
-    self.bitstream.write_symbol(0, &[15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466]);
+    let mi_rows = self.mode_info.rows();
+    let mi_cols = self.mode_info.cols();
 
-    // For uv_mode, the context is simply y_mode combined with whether CFL is allowed
-    // Here the y mode is always DC_PRED and CFL is always allowed for 8x8 blocks,
-    // so we always end up with the same context
-    // uv_mode(context=0, CFL allowed) = DC_PRED
-    self.bitstream.write_symbol(0, &[10407, 11208, 12900, 13181, 13823, 14175, 14899, 15656, 15986, 20086, 20995, 22455, 24212]);
+    // The DC sign context depends on whether there are more +ve signs, more -ve signs,
+    // or an equal number, among all above and left 4x4 units.
+    // As we store the DC sign in ModeInfo::dc_sign as -1 / 0 / +1, we can do this by
+    // simply summing the DC signs of all surrounding blocks
+    let mut net_neighbour_sign = 0;
+    if mi_row > 0 {
+      for above_col in mi_col .. min(mi_col + bsize/4, mi_cols) {
+        net_neighbour_sign += self.mode_info[mi_row - 1][above_col].dc_sign[plane]
+      }
+    }
+    if mi_col > 0 {
+      for left_row in mi_row .. min(mi_row + bsize/4, mi_rows) {
+        net_neighbour_sign += self.mode_info[left_row][mi_col - 1].dc_sign[plane]
+      }
+    }
 
-    // Transform type and coefficients per plane
-    //
+    // Map result to the appropriate context
+    if net_neighbour_sign == 0 {
+      return 0;
+    } else if net_neighbour_sign < 0 {
+      return 1;
+    } else {
+      return 2;
+    }
+  }
+
+  fn encode_coeffs(&mut self, plane: usize, mi_row: usize, mi_col: usize, bsize: usize, this_mi: &mut ModeInfo,
+                   coeffs: &Array2D<i32>) {
+    // We only handle 8x8 luma blocks for now
+    if bsize != 8 {
+      todo!();
+    }
+
+    // Make sure there are the right number of coefficients
+    let txsize = if plane > 0 { bsize/2 } else { bsize };
+    let num_coeffs = txsize * txsize;
+    assert!(coeffs.rows() == txsize);
+    assert!(coeffs.cols() == txsize);
+
+    let scan: &[(u8, u8)] = if txsize == 4 { &default_scan_4x4 } else { &default_scan_8x8 };
+
+    // Find the "end of block" location
+    // This is one past the last nonzero coefficient, or 0 if all coeffs are zero
+    let mut eob = 0;
+    let mut culLevel = 0; // "Cumulative level", gets stored into this_mi.level_ctx
+    for c in 0..num_coeffs {
+      let (row, col) = scan[c];
+      let coeff = coeffs[row as usize][col as usize];
+      culLevel += abs(coeff);
+      if coeff != 0 {
+        eob = c + 1;
+      }
+    }
+    this_mi.level_ctx[plane] = min(culLevel, 63) as u8;
+
+    let all_zero = eob == 0;
+
+    if plane != 0 {
+      // For chroma, we don't signal any coefficients for now
+      // This ends up meaning that the main context is always 7
+      if ! all_zero {
+        todo!();
+      }
+      // all_zero(u/v, context=3,0,7) = 1
+      self.bitstream.write_bool(all_zero, 2713);
+      return;
+    }
+
     // Note on contexts:
     // Coeff symbols have an implicit qindex-based context, which is:
     //  if   qindex <= 20  then qctx = 0
@@ -271,7 +347,10 @@ impl<'a> TileEncoder<'a> {
     // on the nearby transform coefficients, but it's short-circuited to always be 0 for
     // max-size transforms (ie, transform size == block size), which saves us a lot of work!
     // all_zero(y, context=3,1,0) = 0
-    self.bitstream.write_symbol(0, &[31903]);
+    self.bitstream.write_bool(all_zero, 31903);
+    if all_zero {
+      return;
+    }
 
     // Transform type
     // As we selected the reduced transform set in the frame header,
@@ -286,35 +365,282 @@ impl<'a> TileEncoder<'a> {
     // Here, the contexts are qindex, plane type, and (for 16x16 and smaller)
     // whether the selected transform type is 1D (last context = 1) or 2D
     // (last context = 0). We always choose DCT_DCT, which counts as a 2D transform
-    // eob_pt_64(context=3,0,0) = 0, meaning 1 transform coefficient is present
-    self.bitstream.write_symbol(0, &[6307, 7541, 12060, 16358, 22553, 27865]);
+    //
+    // The EOB is split into a class plus optional extra bits. Each class has the following range:
+    // Class 0 => EOB = 1
+    // Class 1 => EOB = 2
+    // Class 2 => EOB = 3-4
+    // Class 3 => EOB = 5-8
+    // ...
+    // up to a maximum class which depends on the transform size
+    // For 4x4 the largest class is class 4 (EOB = 9-16), for 8x8 it's class 6 (EOB = 33-64)
+    let eob_class = ceil_log2(eob) as usize;
+    self.bitstream.write_symbol(eob_class, &[6307, 7541, 12060, 16358, 22553, 27865]);
+    if eob_class > 1 {
+      // EOB classes 2+ require extra bits
+      // The first extra bit is coded with a special CDF, the rest are literal bits
+      // Context = (qctx, tx size, ptype, eob_class - 2)
+      // For 8x8 and luma, this gives:
+      let first_extra_bit_cdf = [
+        [20238],
+        [21057],
+        [19159],
+        [22337],
+        [20159]
+      ];
+      let eob_class_low = (1 << (eob_class - 1)) + 1;
+      let eob_class_hi = 1 << eob_class;
+      assert!(eob_class_low <= eob && eob <= eob_class_hi);
 
-    // Base range of the single coefficient
-    // There is a designated context for "the sole coefficient in a 1-coeff block",
-    // so this ends up always being the main context
-    // coeff_base_eob(context=3,1,0,0) = 1, meaning |quantized coefficient| = 1
-    self.bitstream.write_symbol(0, &[21457, 31043]);
+      let eob_shift = eob_class - 2;
+      let extra_bit = ((eob - eob_class_low) >> eob_shift) & 1;
+      self.bitstream.write_symbol(extra_bit, &first_extra_bit_cdf[eob_class - 2]);
 
-    // Sign of the single coefficient
-    // This is the one case where we need to (pretend to) track state even for this simple case
-    // The DC sign context depends on whether there are more +ve signs, more -ve signs,
-    // or an equal number, among all above and left 4x4 units.
-    // In our case, the first transform block has 0 +ve and 0 -ve signs nearby,
-    // so uses context 0, while all others have more +ves than -ves and so use context 2.
-    // dc_sign(context=3,0,N) = 0, meaning quantized coefficient is +ve
-    let y_dc_sign_cdf = [
-      [128 * 125],
-      [128 * 102],
-      [128 * 147]
-    ];
-    let y_dc_sign_ctx = if mi_row == 0 && mi_col == 0 { 0 } else { 2 };
-    self.bitstream.write_symbol(0, &y_dc_sign_cdf[y_dc_sign_ctx]);
+      // Write any remaining bits as a literal
+      // Note: The AV1 decoder spec gives a more detailed process here,
+      // but it's just writing individual bits from high to low,
+      // which is exactly what write_literal() does
+      let remainder = eob - eob_class_low - (extra_bit << eob_shift);
+      let remainder_bits = eob_class - 2;
+      self.bitstream.write_literal(remainder as u32, remainder_bits as u32);
+    }
+
+    // Write "base range" for each coefficient, in high-to-low index order
+    for c in (0..eob).rev() {
+      // Split coefficient into absolute value and sign, as these are coded separately
+      let (row, col) = scan[c];
+      let coeff = coeffs[row as usize][col as usize];
+      let abs_value = unsigned_abs(coeff) as usize;
+
+      // Code coeff_base symbol, which can indicate values 0, 1, 2, or 3+
+      if c == eob - 1 {
+        // Last nonzero coefficient, so we know this can't be zero
+        // Therefore we use a separate set of CDFs and contexts
+        let base_eob_ctx = if c == 0 {
+          0
+        } else if c <= num_coeffs/8 {
+          1
+        } else if c <= num_coeffs/4 {
+          2
+        } else {
+          3
+        };
+        let coeff_base_eob_cdf = [
+          [21457, 31043],
+          [31951, 32483],
+          [32153, 32562],
+          [31473, 32215]
+        ];
+        assert!(abs_value >= 1);
+        self.bitstream.write_symbol(abs_value - 1, &coeff_base_eob_cdf[base_eob_ctx]);
+      } else {
+        // Context depends on the base values of coefficients below and to the right,
+        // which have already been encoded
+        let base_ctx = if c == 0 {
+          0
+        } else {
+          let mut mag = 0;
+
+          for (row_off, col_off) in Sig_Ref_Diff_Offset {
+            let ref_row = (row + row_off) as usize;
+            let ref_col = (col + col_off) as usize;
+            if ref_row < txsize && ref_col < txsize {
+              mag += min(abs(coeffs[ref_row][ref_col]), 3);
+            }
+          }
+
+          let mag_part = min((mag + 1) >> 1, 4) as usize;
+          let loc_part = Coeff_Base_Ctx_Offset_8x8[min(row, 4) as usize][min(col, 4) as usize] as usize;
+          mag_part + loc_part
+        };
+
+        let coeff_base_cdf = [
+          [7754, 16948, 22142],
+          [25670, 32330, 32691],
+          [15663, 29225, 31994],
+          [9878, 23288, 29158],
+          [6419, 17088, 24336],
+          [3859, 11003, 17039],
+          [27562, 32595, 32725],
+          [17575, 30588, 32399],
+          [10819, 24838, 30309],
+          [7124, 18686, 25916],
+          [4479, 12688, 19340],
+          [28385, 32476, 32673],
+          [15306, 29005, 31938],
+          [8937, 21615, 28322],
+          [5982, 15603, 22786],
+          [3620, 10267, 16136],
+          [27280, 32464, 32667],
+          [15607, 29160, 32004],
+          [9091, 22135, 28740],
+          [6232, 16632, 24020],
+          [4047, 11377, 17672],
+          [29220, 32630, 32718],
+          [19650, 31220, 32462],
+          [13050, 26312, 30827],
+          [9228, 20870, 27468],
+          [6146, 15149, 21971],
+          [30169, 32481, 32623],
+          [17212, 29311, 31554],
+          [9911, 21311, 26882],
+          [4487, 13314, 20372],
+          [2570, 7772, 12889],
+          [30924, 32613, 32708],
+          [19490, 30206, 32107],
+          [11232, 23998, 29276],
+          [6769, 17955, 25035],
+          [4398, 12623, 19214],
+          [30609, 32627, 32722],
+          [19370, 30582, 32287],
+          [10457, 23619, 29409],
+          [6443, 17637, 24834],
+          [4645, 13236, 20106],
+          [8192, 16384, 24576]
+        ];
+        self.bitstream.write_symbol(abs_value, &coeff_base_cdf[base_ctx]);
+      }
+
+      // If coeff_base is 3, we can encode up to 4 symbols to increment the
+      // absolute value further. This can directly encode values up to 14,
+      // or the value 15 for all larger coefficients, in which case the remainder
+      // is Golomb encoded in a separate pass
+      if abs_value > 2 {
+        // All four coeff_br symbols use the same context and CDF, so compute that first
+        let br_ctx = {
+          let mut mag = 0;
+
+          for (row_off, col_off) in Mag_Ref_Offset {
+            let ref_row = (row + row_off) as usize;
+            let ref_col = (col + col_off) as usize;
+            if ref_row < txsize && ref_col < txsize {
+              mag += min(abs(coeffs[ref_row][ref_col]), 15);
+            }
+          }
+
+          let mag_part = min((mag + 1) >> 1, 6) as usize;
+          let loc_part = if c == 0 {
+            0
+          } else if row < 2 && col < 2 {
+            7
+          } else {
+            14
+          };
+          mag_part + loc_part
+        };
+
+        let coeff_br_cdf = [
+          [18274, 24813, 27890],
+          [15537, 23149, 27003],
+          [9449, 16740, 21827],
+          [6700, 12498, 17261],
+          [4988, 9866, 14198],
+          [4236, 8147, 11902],
+          [2867, 5860, 8654],
+          [17124, 23171, 26101],
+          [20396, 27477, 30148],
+          [16573, 24629, 28492],
+          [12749, 20846, 25674],
+          [10233, 17878, 22818],
+          [8525, 15332, 20363],
+          [6283, 11632, 16255],
+          [20466, 26511, 29286],
+          [23059, 29174, 31191],
+          [19481, 27263, 30241],
+          [15458, 23631, 28137],
+          [12416, 20608, 25693],
+          [10261, 18011, 23261],
+          [8016, 14655, 19666]
+        ];
+
+        // Now encode the coeff_br symbols
+        let mut level = 3;
+        for _ in 0..4 {
+          let coeff_br = min(abs_value - level, 3);
+          self.bitstream.write_symbol(coeff_br as usize, &coeff_br_cdf[br_ctx]);
+          level += coeff_br;
+          if coeff_br < 3 {
+            break;
+          }
+        }
+      }
+    }
+
+    // Code DC sign + golomb bits
+    let dc_coeff = coeffs[0][0];
+    if dc_coeff != 0 {
+      // dc_sign(context=3,0,neighbour signs) = 0
+      // TODO: Update to include chroma
+      let sign = if dc_coeff < 0 { 1 } else { 0 };
+      let dc_sign_cdf = [
+        [128 * 125],
+        [128 * 102],
+        [128 * 147]
+      ];
+      let dc_sign_ctx = self.dc_sign_ctx(plane, mi_row, mi_col, bsize);
+      self.bitstream.write_symbol(sign, &dc_sign_cdf[dc_sign_ctx]);
+    }
+    if abs(dc_coeff) >= 15 {
+      self.bitstream.write_golomb(unsigned_abs(dc_coeff) - 15);
+    }
+
+    // Store DC sign for reference by later blocks
+    this_mi.dc_sign[plane] = signum(dc_coeff) as i8;
+
+    // Code sign + golomb bits for the rest of coefficients
+    // Note that this is done in low-to-high index order, in contrast to the earlier loop
+    for c in 1..eob {
+      let (row, col) = scan[c];
+      let coeff = coeffs[row as usize][col as usize];
+      if coeff != 0 {
+        let sign = if coeff < 0 { 1 } else { 0 };
+        self.bitstream.write_literal(sign, 1);
+      }
+
+      if abs(coeff) >= 15 {
+        self.bitstream.write_golomb(unsigned_abs(coeff) - 15);
+      }
+    }
+  }
+
+  fn encode_block(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
+    assert!(bsize == 8);
+
+    // Allocate a ModeInfo struct to hold information about the current block
+    let mut this_mi = ModeInfo::zeroed();
+
+    // For skip, the context depends on the above and left skip flags,
+    // defaulting to false if those aren't present
+    // As we always set skip = false, this context is always 0
+    // skip = false
+    self.bitstream.write_symbol(0, &[31671]);
   
-    // For chroma, we don't signal any coefficients for now
-    // This ends up meaning that the main context is always 7
-    // all_zero(u, context=3,0,7) = 1
-    self.bitstream.write_symbol(1, &[2713]);
-    // all_zero(v, context=3,0,7) = 1
-    self.bitstream.write_symbol(1, &[2713]);
+    // For intra_frame_y_mode, the context depends on the above and left Y modes,
+    // defaulting to DC_PRED if those aren't present
+    // As we always choose DC_PRED, this context is always 0
+    // intra_frame_y_mode(context=0,0) = DC_PRED
+    self.bitstream.write_symbol(0, &[15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466]);
+
+    // For uv_mode, the context is simply y_mode combined with whether CFL is allowed
+    // Here the y mode is always DC_PRED and CFL is always allowed for 8x8 blocks,
+    // so we always end up with the same context
+    // uv_mode(context=0, CFL allowed) = DC_PRED
+    self.bitstream.write_symbol(0, &[10407, 11208, 12900, 13181, 13823, 14175, 14899, 15656, 15986, 20086, 20995, 22455, 24212]);
+
+    // Transform type and coefficients per plane
+    let mut y_coeffs = Array2D::zeroed(8, 8);
+    if (mi_row + mi_col) % 8 < 4 {
+      y_coeffs[1][0] = 1;
+    } else {
+      y_coeffs[0][1] = -1;
+    }
+    self.encode_coeffs(0, mi_row, mi_col, bsize, &mut this_mi, &y_coeffs);
+
+    let uv_coeffs = Array2D::zeroed(4, 4);
+    self.encode_coeffs(1, mi_row, mi_col, bsize, &mut this_mi, &uv_coeffs);
+    self.encode_coeffs(2, mi_row, mi_col, bsize, &mut this_mi, &uv_coeffs);
+
+    // Save mode info
+    self.mode_info.fill_region(mi_row, mi_col, bsize/4, bsize/4, &this_mi);
   }
 }

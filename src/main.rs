@@ -4,9 +4,14 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+// Disable name formatting checks, so that we can name things in line with the AV1 spec
+#![allow(non_snake_case)]
+#![allow(non_upper_case_globals)]
+
 mod array_2d;
 mod av1_encoder;
 mod bitcode;
+mod consts;
 mod entropycode;
 mod frame;
 mod isobmff;
@@ -188,7 +193,7 @@ fn pack_avif(av1_data: &[u8], width: usize, height: usize) -> Box<[u8]> {
 fn main() {
   let width = 256;
   let height = 256;
-  let qindex = 121;
+  let qindex = 255;
 
   // Generate AV1 data
   let encoder = AV1Encoder::new(width, height, qindex);
