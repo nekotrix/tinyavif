@@ -39,15 +39,89 @@ pub fn max<T: Ord>(a: T, b: T) -> T {
   a.max(b)
 }
 
-// Need a bit more logic to set up `abs()` as a function,
-// because in the Rust standard library each signed integer type has its
-// own .abs() method, which isn't part of an overarching trait.
-// So we have to build our own here
+// Wrapper traits for signed/unsigned integer types
+// The methods on these traits aren't intended to be used directly, but instead
+// they exist to allow "normal function" versions to be implemented below
+// eg. instead of value.abs() you can use abs(value)
+pub trait Int {
+  // Divide by 2^n with rounding to nearest, halves toward +infinity
+  fn round2(self, n: u32) -> Self;
+}
 pub trait SignedInt {
   type Unsigned;
   fn abs_(self) -> Self;
   fn unsigned_abs_(self) -> Self::Unsigned;
   fn signum_(self) -> Self;
+
+  // Divide by 2^n with rounding to nearest, halves away from zero
+  fn round2_signed(self, n: u32) -> Self;
+}
+pub trait UnsignedInt: Int {
+  // Floor and ceiling of log2(self)
+  // Both these functions panic if `self == 0`
+  fn floor_log2(self) -> u32;
+  fn ceil_log2(self) -> u32;
+}
+
+impl Int for i8 {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for u8 {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for i16 {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for u16 {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for i32 {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for u32 {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for i64 {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for u64 {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for isize {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
+}
+impl Int for usize {
+  fn round2(self, n: u32) -> Self {
+    let offset = (1 << n) >> 1;
+    (self + offset) >> n
+  }
 }
 
 impl SignedInt for i8 {
@@ -55,37 +129,45 @@ impl SignedInt for i8 {
   fn abs_(self) -> Self { self.abs() }
   fn unsigned_abs_(self) -> Self::Unsigned { self.unsigned_abs() }
   fn signum_(self) -> Self { self.signum() }
+  fn round2_signed(self, n: u32) -> Self {
+    if self < 0 { -round2(-self, n) } else { round2(self, n) }
+  }
 }
 impl SignedInt for i16 {
   type Unsigned = u16;
   fn abs_(self) -> Self { self.abs() }
   fn unsigned_abs_(self) -> Self::Unsigned { self.unsigned_abs() }
   fn signum_(self) -> Self { self.signum() }
+  fn round2_signed(self, n: u32) -> Self {
+    if self < 0 { -round2(-self, n) } else { round2(self, n) }
+  }
 }
 impl SignedInt for i32 {
   type Unsigned = u32;
   fn abs_(self) -> Self { self.abs() }
   fn unsigned_abs_(self) -> Self::Unsigned { self.unsigned_abs() }
   fn signum_(self) -> Self { self.signum() }
+  fn round2_signed(self, n: u32) -> Self {
+    if self < 0 { -round2(-self, n) } else { round2(self, n) }
+  }
 }
 impl SignedInt for i64 {
   type Unsigned = u64;
   fn abs_(self) -> Self { self.abs() }
   fn unsigned_abs_(self) -> Self::Unsigned { self.unsigned_abs() }
   fn signum_(self) -> Self { self.signum() }
+  fn round2_signed(self, n: u32) -> Self {
+    if self < 0 { -round2(-self, n) } else { round2(self, n) }
+  }
 }
 impl SignedInt for isize {
   type Unsigned = usize;
   fn abs_(self) -> Self { self.abs() }
   fn unsigned_abs_(self) -> Self::Unsigned { self.unsigned_abs() }
   fn signum_(self) -> Self { self.signum() }
-}
-
-pub trait UnsignedInt {
-  // Floor and ceiling of log2(self)
-  // Both these functions panic if `self == 0`
-  fn floor_log2(self) -> u32;
-  fn ceil_log2(self) -> u32;
+  fn round2_signed(self, n: u32) -> Self {
+    if self < 0 { -round2(-self, n) } else { round2(self, n) }
+  }
 }
 
 impl UnsignedInt for u8 {
@@ -164,6 +246,9 @@ impl UnsignedInt for usize {
   }
 }
 
+pub fn round2<T: Int>(value: T, n: u32) -> T {
+  value.round2(n)
+}
 
 pub fn abs<T: SignedInt>(value: T) -> T {
   value.abs_()
@@ -177,10 +262,14 @@ pub fn signum<T: SignedInt>(value: T) -> T {
   value.signum_()
 }
 
+pub fn round2_signed<T: SignedInt>(value: T, n: u32) -> T {
+  value.round2_signed(n)
+}
 
 pub fn floor_log2<T: UnsignedInt>(value: T) -> u32 {
   value.floor_log2()
 }
+
 pub fn ceil_log2<T: UnsignedInt>(value: T) -> u32 {
   value.ceil_log2()
 }

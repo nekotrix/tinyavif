@@ -1,3 +1,4 @@
+use std::io;
 use std::io::prelude::*;
 
 use byteorder::{ReadBytesExt, WriteBytesExt};
@@ -19,17 +20,17 @@ pub struct Y4MWriter<W> {
   height: usize
 }
 
-fn read_decimal<R: Read>(r: &mut R) -> usize {
+fn read_decimal<R: Read>(r: &mut R) -> Result<usize, io::Error> {
   let mut v = 0;
   loop {
-    let byte = r.read_u8().unwrap();
+    let byte = r.read_u8()?;
     match byte {
       b'0' ..= b'9' => {
         v = 10*v + (byte - b'0') as usize;
       },
       _ => {
         // Non-digit, stop parsing
-        return v;
+        return Ok(v);
       }
     }
   }
@@ -38,11 +39,11 @@ fn read_decimal<R: Read>(r: &mut R) -> usize {
 // Read next character, expecting it to be whitespace
 // Returns the character if it's whitespace, panics if not
 // TODO: Return a Result type
-fn expect_whitespace<R: Read>(r: &mut R) -> u8 {
-  let byte = r.read_u8().unwrap();
+fn expect_whitespace<R: Read>(r: &mut R) -> Result<u8, io::Error> {
+  let byte = r.read_u8()?;
   match byte {
     b' ' | b'\t' | b'\n' => {
-      return byte;
+      return Ok(byte);
     },
     _ => {
       panic!("Unexpected byte {} in Y4M file", byte);
@@ -52,12 +53,12 @@ fn expect_whitespace<R: Read>(r: &mut R) -> u8 {
 
 // Skip forward until we find a whitespace character
 // Returns the first whitespace character found
-fn find_whitespace<R: Read>(r: &mut R) -> u8 {
+fn find_whitespace<R: Read>(r: &mut R) -> Result<u8, io::Error> {
   loop {
-    let byte = r.read_u8().unwrap();
+    let byte = r.read_u8()?;
     match byte {
       b' ' | b'\t' | b'\n' => {
-        return byte;
+        return Ok(byte);
       },
       _ => {
         continue;
@@ -67,10 +68,10 @@ fn find_whitespace<R: Read>(r: &mut R) -> u8 {
 }
 
 impl<R: Read> Y4MReader<R> {
-  pub fn new(mut inner: R) -> Self {
+  pub fn new(mut inner: R) -> Result<Self, io::Error> {
     // Read header line
     let mut file_magic = [0u8; 10];
-    inner.read_exact(&mut file_magic).unwrap();
+    inner.read_exact(&mut file_magic)?;
     if file_magic != Y4M_FILE_MAGIC.as_bytes() {
       panic!("Invalid file header");
     }
@@ -81,7 +82,7 @@ impl<R: Read> Y4MReader<R> {
     // Parse parameter line
     // TODO: Handle params other than width/height
     loop {
-      match inner.read_u8().unwrap() {
+      match inner.read_u8()? {
         b'\n' => {
           // End of parameter line
           break;
@@ -91,21 +92,21 @@ impl<R: Read> Y4MReader<R> {
           continue;
         },
         b'W' => {
-          width = read_decimal(&mut inner);
-          if expect_whitespace(&mut inner) == b'\n' {
+          width = read_decimal(&mut inner)?;
+          if expect_whitespace(&mut inner)? == b'\n' {
             break;
           }
         },
         b'H' => {
-          height = read_decimal(&mut inner);
-          if expect_whitespace(&mut inner) == b'\n' {
+          height = read_decimal(&mut inner)?;
+          if expect_whitespace(&mut inner)? == b'\n' {
             break;
           }
         },
         _ => {
           // Other parameters that we aren't parsing yet
           // Just skip until we find whitespace
-          if find_whitespace(&mut inner) == b'\n' {
+          if find_whitespace(&mut inner)? == b'\n' {
             break;
           }
         }
@@ -117,59 +118,58 @@ impl<R: Read> Y4MReader<R> {
       panic!("Invalid Y4M size {}x{}", width, height);
     }
 
-    Y4MReader {
+    Ok(Y4MReader {
       inner: inner,
       width: width,
       height: height
-    }
+    })
   }
 
-  pub fn read_frame(&mut self) -> Box<Frame> {
+  pub fn read_frame(&mut self) -> Result<Box<Frame>, io::Error> {
     // Read frame line
     // Technically this can have parameters, but they aren't useful to us.
     // So just check the magic number to ensure we're in the right place
     // and skip the rest of the line
     let mut frame_magic = [0u8; 5];
-    self.inner.read_exact(&mut frame_magic).unwrap();
+    self.inner.read_exact(&mut frame_magic)?;
     if frame_magic != Y4M_FRAME_MAGIC.as_bytes() {
       panic!("Invalid frame header");
     }
   
-    while self.inner.read_u8().unwrap() != b'\n' {}
+    while self.inner.read_u8()? != b'\n' {}
   
     // Read actual frame data
-    // TODO: Allow for non-contiguous rows
     let mut frame = Frame::new(self.width, self.height);
-    self.inner.read_exact(&mut frame.y_mut().data).unwrap();
-    self.inner.read_exact(&mut frame.u_mut().data).unwrap();
-    self.inner.read_exact(&mut frame.v_mut().data).unwrap();
+    frame.y_mut().read_from(&mut self.inner)?;
+    frame.u_mut().read_from(&mut self.inner)?;
+    frame.v_mut().read_from(&mut self.inner)?;
 
-    return Box::new(frame);
+    Ok(Box::new(frame))
   }
 }
 
 impl<W: Write> Y4MWriter<W> {
-  pub fn new(mut inner: W, width: usize, height: usize) -> Self {
-    inner.write_all(Y4M_FILE_MAGIC.as_bytes()).unwrap();
-    write!(inner, "W{} H{}\n", width, height).unwrap();
+  pub fn new(mut inner: W, width: usize, height: usize) -> Result<Self, io::Error> {
+    inner.write_all(Y4M_FILE_MAGIC.as_bytes())?;
+    write!(inner, "W{} H{}\n", width, height)?;
 
-    Y4MWriter {
+    Ok(Y4MWriter {
       inner: inner,
       width: width,
       height: height
-    }
+    })
   }
 
-  pub fn write_frame(&mut self, frame: &Frame) {
-    assert!(frame.y().width == self.width);
-    assert!(frame.y().height == self.height);
+  pub fn write_frame(&mut self, frame: &Frame) -> Result<(), io::Error> {
+    assert!(frame.y().width() == self.width);
+    assert!(frame.y().height() == self.height);
 
-    self.inner.write_all(Y4M_FRAME_MAGIC.as_bytes()).unwrap();
-    self.inner.write_u8(b'\n').unwrap();
+    self.inner.write_all(Y4M_FRAME_MAGIC.as_bytes())?;
+    self.inner.write_u8(b'\n')?;
+    frame.y().write_to(&mut self.inner)?;
+    frame.u().write_to(&mut self.inner)?;
+    frame.v().write_to(&mut self.inner)?;
 
-    // TODO: Allow for non-contiguous rows
-    self.inner.write_all(&frame.y().data).unwrap();
-    self.inner.write_all(&frame.u().data).unwrap();
-    self.inner.write_all(&frame.v().data).unwrap();
+    Ok(())
   }
 }

@@ -5,17 +5,22 @@ use crate::bitcode::BitWriter;
 use crate::consts::*;
 use crate::entropycode::EntropyWriter;
 use crate::enums::*;
+use crate::frame::Frame;
 use crate::util::*;
 
 // Top-level encoder state
 pub struct AV1Encoder {
   // Size used for encoding - always padded to a multiple of 8x8 luma pixels
-  width: usize,
-  height: usize,
+  y_width: usize,
+  y_height: usize,
+  uv_width: usize,
+  uv_height: usize,
 
   // Original image size
-  crop_width: usize,
-  crop_height: usize,
+  y_crop_width: usize,
+  y_crop_height: usize,
+  uv_crop_width: usize,
+  uv_crop_height: usize,
 
   qindex: u8
 }
@@ -44,26 +49,37 @@ pub struct ModeInfo {
 pub struct TileEncoder<'a> {
   encoder: &'a AV1Encoder,
   bitstream: EntropyWriter,
-  mode_info: Array2D<ModeInfo>
+  mode_info: Array2D<ModeInfo>,
+  frame: Frame
 }
 
 impl AV1Encoder {
-  pub fn new(crop_width: usize, crop_height: usize, qindex: u8) -> Self {
+  pub fn new(y_crop_width: usize, y_crop_height: usize, qindex: u8) -> Self {
     // Check limits imposed by AV1
-    assert!(0 < crop_width && crop_width <= 65536);
-    assert!(0 < crop_height && crop_height <= 65536);
+    assert!(0 < y_crop_width && y_crop_width <= 65536);
+    assert!(0 < y_crop_height && y_crop_height <= 65536);
 
     // We don't currently support lossless mode
     assert!(qindex != 0);
 
-    let width = crop_width.next_multiple_of(8);
-    let height = crop_height.next_multiple_of(8);
+    let y_width = y_crop_width.next_multiple_of(8);
+    let y_height = y_crop_height.next_multiple_of(8);
+
+    let uv_crop_width = round2(y_crop_width, 1);
+    let uv_crop_height = round2(y_crop_height, 1);
+
+    let uv_width = y_width / 2;
+    let uv_height = y_height / 2;
 
     Self {
-      width: width,
-      height: height,
-      crop_width: crop_width,
-      crop_height: crop_height,
+      y_width: y_width,
+      y_height: y_height,
+      uv_width: uv_width,
+      uv_height: uv_height,
+      y_crop_width: y_crop_width,
+      y_crop_height: y_crop_height,
+      uv_crop_width: uv_crop_width,
+      uv_crop_height: uv_crop_height,
       qindex: qindex
     }
   }
@@ -81,8 +97,8 @@ impl AV1Encoder {
     // for simplicity), then one less than the actual width and height
     w.write_bits(15, 4);
     w.write_bits(15, 4);
-    w.write_bits((self.crop_width-1) as u64, 16);
-    w.write_bits((self.crop_height-1) as u64, 16);
+    w.write_bits((self.y_crop_width-1) as u64, 16);
+    w.write_bits((self.y_crop_height-1) as u64, 16);
   
     // Now to disable a bunch of features we aren't going to use
     // 6 zero bits means:
@@ -118,10 +134,10 @@ impl AV1Encoder {
     // corresponding flag is implicitly set to 0 and doesn't need to be signalled.
     // So we need to add these conditionally
     w.write_bit(1); // Uniform tile mode - allows the cheapest signaling of 1x1 tile layout
-    if self.width > 64 {
+    if self.y_width > 64 {
       w.write_bit(0); // 1 tile column
     }
-    if self.height > 64 {
+    if self.y_height > 64 {
       w.write_bit(0); // 1 tile row
     }
   
@@ -151,13 +167,14 @@ impl AV1Encoder {
     // Encode a single tile for now
 
     // Allocate MI array
-    let mi_rows = self.height / 4;
-    let mi_cols = self.width / 4;
+    let mi_rows = self.y_height / 4;
+    let mi_cols = self.y_width / 4;
 
     let mut tile = TileEncoder {
       encoder: &self,
       bitstream: EntropyWriter::new(),
-      mode_info: Array2D::zeroed(mi_rows, mi_cols)
+      mode_info: Array2D::zeroed(mi_rows, mi_cols),
+      frame: Frame::new(self.y_crop_width, self.y_crop_height)
     };
 
     tile.encode();
@@ -483,7 +500,7 @@ impl<'a> TileEncoder<'a> {
             }
           }
 
-          let mag_part = min((mag + 1) >> 1, 4) as usize;
+          let mag_part = min(round2(mag, 1), 4) as usize;
           let loc_part = Coeff_Base_Ctx_Offset_8x8[min(row, 4) as usize][min(col, 4) as usize] as usize;
           mag_part + loc_part
         };
@@ -552,7 +569,7 @@ impl<'a> TileEncoder<'a> {
             }
           }
 
-          let mag_part = min((mag + 1) >> 1, 6) as usize;
+          let mag_part = min(round2(mag, 1), 6) as usize;
           let loc_part = if c == 0 {
             0
           } else if row < 2 && col < 2 {
@@ -661,7 +678,8 @@ impl<'a> TileEncoder<'a> {
     // uv_mode(context=0, CFL allowed) = DC_PRED
     self.bitstream.write_symbol(0, &[10407, 11208, 12900, 13181, 13823, 14175, 14899, 15656, 15986, 20086, 20995, 22455, 24212]);
 
-    // Transform type and coefficients per plane
+    // Encode residual per plane
+    // TODO: Calculate residual and transform
     let mut y_coeffs = Array2D::zeroed(8, 8);
     if (mi_row + mi_col) % 8 < 4 {
       y_coeffs[1][0] = 1;
