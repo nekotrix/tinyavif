@@ -1,12 +1,16 @@
 use bytemuck::Zeroable;
+use std::io;
+use std::fs::File;
 
-use crate::array_2d::Array2D;
+use crate::array2d::Array2D;
 use crate::bitcode::BitWriter;
 use crate::consts::*;
 use crate::entropycode::EntropyWriter;
 use crate::enums::*;
 use crate::frame::Frame;
+use crate::recon::*;
 use crate::util::*;
+use crate::y4m::*;
 
 // Top-level encoder state
 pub struct AV1Encoder {
@@ -49,8 +53,17 @@ pub struct ModeInfo {
 pub struct TileEncoder<'a> {
   encoder: &'a AV1Encoder,
   bitstream: EntropyWriter,
+
+  // Mode info per 4x4 luma pixel unit
   mode_info: Array2D<ModeInfo>,
-  frame: Frame
+
+  // Source frame
+  // This is the image we are trying to reproduce
+  // This must be pre-padded to match encoder.y_{width/height}, not the crop size
+  source: &'a Frame,
+
+  // Reconstructed frame
+  recon: Frame,
 }
 
 impl AV1Encoder {
@@ -163,8 +176,10 @@ impl AV1Encoder {
     return w.finalize(add_trailing_one_bit);
   }
 
-  pub fn encode_image(&self) -> Box<[u8]> {
+  pub fn encode_image(&self, source: &Frame) -> Box<[u8]> {
     // Encode a single tile for now
+    assert!(source.y().width() == self.y_width);
+    assert!(source.y().height() == self.y_height);
 
     // Allocate MI array
     let mi_rows = self.y_height / 4;
@@ -174,10 +189,12 @@ impl AV1Encoder {
       encoder: &self,
       bitstream: EntropyWriter::new(),
       mode_info: Array2D::zeroed(mi_rows, mi_cols),
-      frame: Frame::new(self.y_crop_width, self.y_crop_height)
+      source: source,
+      recon: Frame::new(self.y_height, self.y_width)
     };
 
     tile.encode();
+    tile.dump_recon("recon.y4m").unwrap();
     return tile.bitstream.finalize();
   }
 }
@@ -203,6 +220,7 @@ impl<'a> TileEncoder<'a> {
   }
 
   fn encode_partition(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
+    println!("Encoding {:2}x{:2} partition at mi_row={:3}, mi_col={:3}", bsize, bsize, mi_row, mi_col);
     // Always split down to 8x8 blocks
     // For each partition symbol, the context depends on whether the above and/or left
     // blocks are partitioned to a size smaller than what we're currently considering.
@@ -483,7 +501,8 @@ impl<'a> TileEncoder<'a> {
           [31473, 32215]
         ];
         assert!(abs_value >= 1);
-        self.bitstream.write_symbol(abs_value - 1, &coeff_base_eob_cdf[base_eob_ctx]);
+        let coded_value = min(abs_value - 1, 2);
+        self.bitstream.write_symbol(coded_value, &coeff_base_eob_cdf[base_eob_ctx]);
       } else {
         // Context depends on the base values of coefficients below and to the right,
         // which have already been encoded
@@ -549,7 +568,8 @@ impl<'a> TileEncoder<'a> {
           [4645, 13236, 20106],
           [8192, 16384, 24576]
         ];
-        self.bitstream.write_symbol(abs_value, &coeff_base_cdf[base_ctx]);
+        let coded_value = min(abs_value, 3);
+        self.bitstream.write_symbol(coded_value, &coeff_base_cdf[base_ctx]);
       }
 
       // If coeff_base is 3, we can encode up to 4 symbols to increment the
@@ -657,6 +677,8 @@ impl<'a> TileEncoder<'a> {
   fn encode_block(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
     assert!(bsize == 8);
 
+    println!("Encoding 8x8 block at mi_row={:3}, mi_col={:3}", mi_row, mi_col);
+
     // Allocate a ModeInfo struct to hold information about the current block
     let mut this_mi = ModeInfo::zeroed();
 
@@ -678,21 +700,47 @@ impl<'a> TileEncoder<'a> {
     // uv_mode(context=0, CFL allowed) = DC_PRED
     self.bitstream.write_symbol(0, &[10407, 11208, 12900, 13181, 13823, 14175, 14899, 15656, 15986, 20086, 20995, 22455, 24212]);
 
-    // Encode residual per plane
-    // TODO: Calculate residual and transform
-    let mut y_coeffs = Array2D::zeroed(8, 8);
-    if (mi_row + mi_col) % 8 < 4 {
-      y_coeffs[1][0] = 1;
-    } else {
-      y_coeffs[0][1] = -1;
-    }
-    self.encode_coeffs(0, mi_row, mi_col, bsize, &mut this_mi, &y_coeffs);
+    // Encode residuals
+    for plane in 0..1 {
+      let subsampling = if plane > 0 { 1 } else { 0 };
+      let y0 = (mi_row * 4) >> subsampling;
+      let x0 = (mi_col * 4) >> subsampling;
+      let h = bsize >> subsampling;
+      let w = bsize >> subsampling;
 
-    let uv_coeffs = Array2D::zeroed(4, 4);
-    self.encode_coeffs(1, mi_row, mi_col, bsize, &mut this_mi, &uv_coeffs);
-    self.encode_coeffs(2, mi_row, mi_col, bsize, &mut this_mi, &uv_coeffs);
+      dc_predict(self.recon.plane_mut(plane).pixels_mut(), y0, x0, h, w);
+      let mut residual = compute_residual(self.source.plane(plane).pixels(),
+                                          self.recon.plane(plane).pixels(),
+                                          y0, x0, h, w);
+      quantize(&mut residual, self.encoder.qindex);
+
+      // Encode the quantized coefficients while we have them,
+      // before we consume them to finalize the reconstructed image
+      self.encode_coeffs(0, mi_row, mi_col, bsize, &mut this_mi, &residual);
+
+      dequantize(&mut residual, self.encoder.qindex);
+      apply_residual(self.recon.plane_mut(plane).pixels_mut(), residual, y0, x0, h, w);
+    }
+
+    // Temporary stuff to generate valid residuals for each plane
+    // TODO: Remove this stuff once the loop above works properly
+    {
+      let uv_coeffs = Array2D::zeroed(4, 4);
+      self.encode_coeffs(1, mi_row, mi_col, bsize, &mut this_mi, &uv_coeffs);
+      self.encode_coeffs(2, mi_row, mi_col, bsize, &mut this_mi, &uv_coeffs);
+    }
 
     // Save mode info
     self.mode_info.fill_region(mi_row, mi_col, bsize/4, bsize/4, &this_mi);
+  }
+
+  fn dump_recon(&mut self, path: &str) -> Result<(), io::Error> {
+    // Temporary: Fill UV planes to make things gray instead of green
+    self.recon.u_mut().pixels_mut().map(|_, _, _| 128);
+    self.recon.v_mut().pixels_mut().map(|_, _, _| 128);
+
+    let mut y4m = Y4MWriter::new(File::create(path)?, self.encoder.y_width, self.encoder.y_height)?;
+    y4m.write_frame(&self.recon)?;
+    Ok(())
   }
 }

@@ -1,15 +1,18 @@
-//
+// Main executable
+
+// TODO: Standardize on (row, col) ordering for everything?
 
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_imports)]
+#![allow(unreachable_code)]
 
 // Disable name styling checks, so that we can name things in line with the AV1 spec
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-mod array_2d;
+mod array2d;
 mod av1_encoder;
 mod bitcode;
 mod consts;
@@ -17,6 +20,8 @@ mod entropycode;
 mod enums;
 mod frame;
 mod isobmff;
+mod recon;
+mod txfm;
 mod util;
 mod y4m;
 
@@ -26,6 +31,7 @@ use std::fs::File;
 use av1_encoder::AV1Encoder;
 use isobmff::ISOBMFFWriter;
 use util::write_leb128;
+use y4m::Y4MReader;
 
 fn pack_obus(sequence_header: &[u8], frame_header: &[u8], tile_data: &[u8], include_temporal_delimiter: bool) -> Box<[u8]> {
   let mut av1_data = Vec::new();
@@ -193,15 +199,20 @@ fn pack_avif(av1_data: &[u8], crop_width: usize, crop_height: usize) -> Box<[u8]
 }
 
 fn main() {
-  let crop_width = 352;
-  let crop_height = 288;
-  let qindex = 255;
+  let qindex = 121;
+
+  let source_file = File::open("bus_cif.y4m").unwrap();
+  let mut y4m = Y4MReader::new(source_file).unwrap();
+  let source = y4m.read_frame().unwrap();
+
+  let crop_width = source.y().crop_width();
+  let crop_height = source.y().crop_height();
 
   // Generate AV1 data
   let encoder = AV1Encoder::new(crop_width, crop_height, qindex);
   let sequence_header = encoder.generate_sequence_header();
   let frame_header = encoder.generate_frame_header(false);
-  let tile_data = encoder.encode_image();
+  let tile_data = encoder.encode_image(&source);
 
   // Pack into higher-level structure and write out
   let av1_data = pack_obus(&sequence_header, &frame_header, &tile_data, true);

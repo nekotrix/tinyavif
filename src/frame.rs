@@ -1,7 +1,7 @@
 use std::io;
 use std::io::prelude::*;
 
-use crate::array_2d::Array2D;
+use crate::array2d::Array2D;
 use crate::util::*;
 
 pub struct Plane {
@@ -86,7 +86,7 @@ pub struct Frame {
 }
 
 impl Frame {
-  pub fn new(y_crop_width: usize, y_crop_height: usize) -> Self {
+  pub fn new(y_crop_height: usize, y_crop_width: usize) -> Self {
     let y_width = y_crop_width.next_multiple_of(8);
     let y_height = y_crop_height.next_multiple_of(8);
 
@@ -99,17 +99,17 @@ impl Frame {
     Self {
       planes: [
         Plane {
-          pixels: Array2D::zeroed(y_width, y_height),
+          pixels: Array2D::zeroed(y_height, y_width),
           crop_width: y_crop_width,
           crop_height: y_crop_height
         },
         Plane {
-          pixels: Array2D::zeroed(uv_width, uv_height),
+          pixels: Array2D::zeroed(uv_height, uv_width),
           crop_width: uv_crop_width,
           crop_height: uv_crop_height
         },
         Plane {
-          pixels: Array2D::zeroed(uv_width, uv_height),
+          pixels: Array2D::zeroed(uv_height, uv_width),
           crop_width: uv_crop_width,
           crop_height: uv_crop_height
         },
@@ -121,7 +121,7 @@ impl Frame {
     &self.planes[idx]
   }
 
-  pub fn plane_mut(&mut self, idx: usize) -> &Plane {
+  pub fn plane_mut(&mut self, idx: usize) -> &mut Plane {
     &mut self.planes[idx]
   }
 

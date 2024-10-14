@@ -1,14 +1,6 @@
 # Pathway toward an actual encoder
 
-* Maintain an encoder-side idea of what the reconstructed output should be,
-  and dump that to a file for debugging
-
-* Implement DC_PRED logic - this is enough for all predictions currently
-
-* Implement 8x8 forward and inverse transforms - this is enough for luma
-
-* Hook up transform pipeline
-  load source => subtract pred => txfm => quantize => inverse txfm => add to pred => store to recon
+* Figure out small (+/- 1 pixel value) discrepancies between encoder recon and avifdec output
 
 * Hook up chroma transforms + coefficient encoding
   * Requires implementing 4x4 forward and inverse transforms

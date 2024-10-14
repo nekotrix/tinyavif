@@ -20,7 +20,7 @@ pub struct Y4MWriter<W> {
   height: usize
 }
 
-fn read_decimal<R: Read>(r: &mut R) -> Result<usize, io::Error> {
+fn read_decimal<R: Read>(r: &mut R) -> Result<(usize, u8), io::Error> {
   let mut v = 0;
   loop {
     let byte = r.read_u8()?;
@@ -30,7 +30,8 @@ fn read_decimal<R: Read>(r: &mut R) -> Result<usize, io::Error> {
       },
       _ => {
         // Non-digit, stop parsing
-        return Ok(v);
+        // Return value and the character that wasn't part of this value
+        return Ok((v, byte));
       }
     }
   }
@@ -92,15 +93,21 @@ impl<R: Read> Y4MReader<R> {
           continue;
         },
         b'W' => {
-          width = read_decimal(&mut inner)?;
-          if expect_whitespace(&mut inner)? == b'\n' {
-            break;
+          let byte;
+          (width, byte) = read_decimal(&mut inner)?;
+          match byte {
+            b'\n' => { break; },
+            b' ' | b'\t' | b'\r' => { continue; }
+            _ => { panic!("Unexpected byte {} in Y4M file", byte); }
           }
         },
         b'H' => {
-          height = read_decimal(&mut inner)?;
-          if expect_whitespace(&mut inner)? == b'\n' {
-            break;
+          let byte;
+          (height, byte) = read_decimal(&mut inner)?;
+          match byte {
+            b'\n' => { break; },
+            b' ' | b'\t' | b'\r' => { continue; }
+            _ => { panic!("Unexpected byte {} in Y4M file", byte); }
           }
         },
         _ => {
@@ -139,7 +146,7 @@ impl<R: Read> Y4MReader<R> {
     while self.inner.read_u8()? != b'\n' {}
   
     // Read actual frame data
-    let mut frame = Frame::new(self.width, self.height);
+    let mut frame = Frame::new(self.height, self.width);
     frame.y_mut().read_from(&mut self.inner)?;
     frame.u_mut().read_from(&mut self.inner)?;
     frame.v_mut().read_from(&mut self.inner)?;

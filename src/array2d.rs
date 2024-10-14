@@ -4,6 +4,7 @@ use bytemuck::allocation::zeroed_slice_box;
 use std::ops::{Index, IndexMut};
 
 // Two-dimensional array type
+#[derive(Clone, Debug)]
 pub struct Array2D<T> {
   rows: usize,
   cols: usize,
@@ -18,6 +19,16 @@ impl<T> Array2D<T> {
 
   pub fn cols(&self) -> usize {
     self.cols
+  }
+}
+
+impl<T> Array2D<T> {
+  pub fn fill_with<F: FnMut(usize, usize) -> T>(&mut self, mut f: F) {
+    for i in 0..self.rows {
+      for j in 0..self.cols {
+        self[i][j] = f(i, j);
+      }
+    }
   }
 }
 
@@ -37,8 +48,7 @@ impl<T: Clone> Array2D<T> {
     for row in row_start .. row_end {
       for col in col_start .. col_end {
         // Due to the above checks, this calculation should never overflow
-        let index = row * self.stride + col;
-        self.data[index] = value.clone();
+        self[row][col] = value.clone();
       }
     }
   }
@@ -55,6 +65,39 @@ impl<T: Zeroable> Array2D<T> {
       cols: cols,
       stride: stride,
       data: data
+    }
+  }
+
+  // TODO: Figure out how to make this not require Zeroable
+  pub fn new_with<F: FnMut(usize, usize) -> T>(rows: usize, cols: usize, f: F) -> Self {
+    let mut result = Array2D::zeroed(rows, cols);
+    result.fill_with(f);
+    return result;
+  }
+}
+
+impl<T: Zeroable + Copy> Array2D<T> {
+  pub fn transpose_into(&self, dst: &mut Self) {
+    assert!(self.rows == dst.cols);
+    assert!(self.cols == dst.rows);
+    for i in 0..self.cols {
+      for j in 0..self.rows {
+        dst[i][j] = self[j][i];
+      }
+    }
+  }
+
+  pub fn transpose(&self) -> Self {
+    let mut dst = Array2D::zeroed(self.cols, self.rows);
+    self.transpose_into(&mut dst);
+    return dst;
+  }
+
+  pub fn map<F: FnMut(usize, usize, T) -> T>(&mut self, mut f: F) {
+    for i in 0..self.rows {
+      for j in 0..self.cols {
+        self[i][j] = f(i, j, self[i][j]);
+      }
     }
   }
 }

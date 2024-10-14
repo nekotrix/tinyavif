@@ -39,6 +39,16 @@ pub fn max<T: Ord>(a: T, b: T) -> T {
   a.max(b)
 }
 
+pub fn clamp<T: Ord>(v: T, lo: T, hi: T) -> T {
+  if v < lo {
+    lo
+  } else if v > hi {
+    hi
+  } else {
+    v
+  }
+}
+
 // Wrapper traits for signed/unsigned integer types
 // The methods on these traits aren't intended to be used directly, but instead
 // they exist to allow "normal function" versions to be implemented below
