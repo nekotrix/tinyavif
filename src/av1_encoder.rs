@@ -4,6 +4,7 @@ use crate::array_2d::Array2D;
 use crate::bitcode::BitWriter;
 use crate::consts::*;
 use crate::entropycode::EntropyWriter;
+use crate::enums::*;
 use crate::util::*;
 
 // Top-level encoder state
@@ -80,8 +81,8 @@ impl AV1Encoder {
     // for simplicity), then one less than the actual width and height
     w.write_bits(15, 4);
     w.write_bits(15, 4);
-    w.write_bits((self.width-1) as u64, 16);
-    w.write_bits((self.height-1) as u64, 16);
+    w.write_bits((self.crop_width-1) as u64, 16);
+    w.write_bits((self.crop_height-1) as u64, 16);
   
     // Now to disable a bunch of features we aren't going to use
     // 6 zero bits means:
@@ -150,8 +151,8 @@ impl AV1Encoder {
     // Encode a single tile for now
 
     // Allocate MI array
-    let mi_rows = self.width / 4;
-    let mi_cols = self.height / 4;
+    let mi_rows = self.height / 4;
+    let mi_cols = self.width / 4;
 
     let mut tile = TileEncoder {
       encoder: &self,
@@ -166,8 +167,10 @@ impl AV1Encoder {
 
 impl<'a> TileEncoder<'a> {
   pub fn encode(&mut self) {
-    let sb_cols = self.encoder.width.div_ceil(64);
-    let sb_rows = self.encoder.height.div_ceil(64);
+    let mi_rows = self.mode_info.rows();
+    let mi_cols = self.mode_info.cols();
+    let sb_rows = mi_rows.div_ceil(16);
+    let sb_cols = mi_cols.div_ceil(16);
 
     for sb_row in 0..sb_rows {
       for sb_col in 0..sb_cols {
@@ -203,6 +206,12 @@ impl<'a> TileEncoder<'a> {
       self.bitstream.write_symbol(0, &cdf); // PARTITION_NONE
       self.encode_block(mi_row, mi_col, bsize);
     } else {
+      let mi_rows = self.mode_info.rows();
+      let mi_cols = self.mode_info.cols();
+
+      let sub_rows = if (mi_row + bsize/8) < mi_rows { 2 } else { 1 };
+      let sub_cols = if (mi_col + bsize/8) < mi_cols { 2 } else { 1 };
+
       let all_cdfs = [
         // 16x16
         [
@@ -237,11 +246,36 @@ impl<'a> TileEncoder<'a> {
       let ctx = 2 * left_ctx + above_ctx;
 
       let cdf = &all_cdfs[bsize_ctx][ctx];
-      self.bitstream.write_symbol(3, cdf); // PARTITION_SPLIT
+
+      if sub_rows > 1 && sub_cols > 1 {
+        self.bitstream.write_symbol(3, cdf); // PARTITION_SPLIT
+      } else if sub_cols > 1 {
+        // Derive a binary CDF to pick between PARTITION_HORZ (0) or PARTITION_SPLIT (1)
+        // The probability of PARTITION_SPLIT is calculated by summing the probabilities
+        // of the following options using the original CDF:
+        let p_split = get_prob(Partition::VERT as usize, cdf) +
+                      get_prob(Partition::SPLIT as usize, cdf) +
+                      get_prob(Partition::HORZ_A as usize, cdf) +
+                      get_prob(Partition::VERT_A as usize, cdf) +
+                      get_prob(Partition::VERT_B as usize, cdf) +
+                      get_prob(Partition::VERT_4 as usize, cdf);
+        self.bitstream.write_bit(1, 32768 - p_split);
+      } else if sub_rows > 1 {
+        // Derive a binary CDF to pick between PARTITION_VERT (0) or PARTITION_SPLIT (1)
+        let p_split = get_prob(Partition::HORZ as usize, cdf) +
+                      get_prob(Partition::SPLIT as usize, cdf) +
+                      get_prob(Partition::HORZ_A as usize, cdf) +
+                      get_prob(Partition::HORZ_B as usize, cdf) +
+                      get_prob(Partition::VERT_A as usize, cdf) +
+                      get_prob(Partition::HORZ_4 as usize, cdf);
+        self.bitstream.write_bit(1, 32768 - p_split);
+      } else {
+        // PARTITION_SPLIT is forced, so no need to encode anything
+      }
 
       let offset = bsize / 8;
-      for i in 0..2 {
-        for j in 0..2 {
+      for i in 0..sub_rows {
+        for j in 0..sub_cols {
           self.encode_partition(mi_row + i*offset, mi_col + j*offset, bsize/2);
         }
       }

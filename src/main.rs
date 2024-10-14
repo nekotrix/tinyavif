@@ -4,7 +4,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-// Disable name formatting checks, so that we can name things in line with the AV1 spec
+// Disable name styling checks, so that we can name things in line with the AV1 spec
+#![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
@@ -13,6 +14,7 @@ mod av1_encoder;
 mod bitcode;
 mod consts;
 mod entropycode;
+mod enums;
 mod frame;
 mod isobmff;
 mod util;
@@ -59,7 +61,7 @@ fn pack_obus(sequence_header: &[u8], frame_header: &[u8], tile_data: &[u8], incl
   return av1_data.into_boxed_slice();
 }
 
-fn pack_avif(av1_data: &[u8], width: usize, height: usize) -> Box<[u8]> {
+fn pack_avif(av1_data: &[u8], crop_width: usize, crop_height: usize) -> Box<[u8]> {
   let mut avif = ISOBMFFWriter::new();
 
   let content_pos_marker;
@@ -127,8 +129,8 @@ fn pack_avif(av1_data: &[u8], width: usize, height: usize) -> Box<[u8]> {
       {
         // "Image spatial extent" box
         let mut ispe = ipco.open_box_with_version(b"ispe", 0, 0);
-        ispe.write_u32(width as u32);
-        ispe.write_u32(height as u32);
+        ispe.write_u32(crop_width as u32);
+        ispe.write_u32(crop_height as u32);
         drop(ispe);
 
         // "Pixel information" box
@@ -191,19 +193,22 @@ fn pack_avif(av1_data: &[u8], width: usize, height: usize) -> Box<[u8]> {
 }
 
 fn main() {
-  let width = 256;
-  let height = 256;
+  let crop_width = 352;
+  let crop_height = 288;
   let qindex = 255;
 
   // Generate AV1 data
-  let encoder = AV1Encoder::new(width, height, qindex);
+  let encoder = AV1Encoder::new(crop_width, crop_height, qindex);
   let sequence_header = encoder.generate_sequence_header();
   let frame_header = encoder.generate_frame_header(false);
   let tile_data = encoder.encode_image();
 
   // Pack into higher-level structure and write out
   let av1_data = pack_obus(&sequence_header, &frame_header, &tile_data, true);
-  let avif_data = pack_avif(&av1_data, width, height);
+  let avif_data = pack_avif(&av1_data, crop_width, crop_height);
+
+  let mut obu_file = File::create("test.obu").unwrap();
+  obu_file.write_all(&av1_data).unwrap();
 
   let mut avif_file = File::create("test.avif").unwrap();
   avif_file.write_all(&avif_data).unwrap();

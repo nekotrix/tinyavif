@@ -28,6 +28,12 @@ impl BitWriter {
     }
   }
 
+  // Helper function: Write a flag which is logically a boolean
+  // This is just syntactic sugar over self.write_bit(), mapping false => 0 and true => 1
+  pub fn write_bool(&mut self, flag: bool) {
+    self.write_bit(flag as u8);
+  }
+
   pub fn write_bits(&mut self, bits: u64, nbits: usize) {
     // Only allow up to 56 bits in a single write, to simplify some later logic
     assert!(nbits <= 56);

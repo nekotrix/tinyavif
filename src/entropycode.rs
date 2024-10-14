@@ -51,7 +51,7 @@ impl EntropyWriter {
   // We do not store these values in the cdf array, and instead handle these cases
   // with ifs in this function
   pub fn write_symbol(&mut self, symbol: usize, cdf: &[u16]) {
-    println!("Write symbol {} with CDF {:?}", symbol, cdf);
+    //println!("Write symbol {} with CDF {:?}", symbol, cdf);
     let num_symbols = cdf.len() + 1;
     let inv_hi = if symbol == num_symbols - 1 { 0 } else { 32768 - (cdf[symbol] as u32) };
 
@@ -97,10 +97,17 @@ impl EntropyWriter {
     self.count = s;
   }
 
-  // Helper function: Write a boolean symbol, without needing extra syntax fluff to convert
-  // from {bool, probability} to {usize, CDF}
+  // Helper function: Write a single bit symbol, without needing extra syntax fluff to convert
+  // from a single probability to a CDF
   // Note that, due to the way CDFs are encoded, the specified probability is the probability
-  // of this bool being *false*.
+  // of this bit being zero
+  pub fn write_bit(&mut self, value: usize, p_zero: u16) {
+    assert!(value == 0 || value == 1);
+    self.write_symbol(value, &[p_zero]);
+  }
+
+  // Helper function: Write a flag which is logically a boolean
+  // This is just syntactic sugar over self.write_bit(), mapping false => 0 and true => 1
   pub fn write_bool(&mut self, value: bool, p_false: u16) {
     self.write_symbol(value as usize, &[p_false]);
   }
@@ -112,7 +119,7 @@ impl EntropyWriter {
     assert!(nbits == 32 || value < (1 << nbits));
     for shift in (0..nbits).rev() {
       let bit = (value >> shift) & 1;
-      self.write_symbol(bit as usize, &[16384]);
+      self.write_bit(bit as usize, 16384);
     }
   }
 
@@ -123,9 +130,9 @@ impl EntropyWriter {
 
     let length = floor_log2(value);
     for _ in 0 .. length {
-      self.write_bool(true, 16384);
+      self.write_bit(1, 16384);
     }
-    self.write_bool(false, 16384);
+    self.write_bit(0, 16384);
 
     self.write_literal(value - (1 << length), length);
   }

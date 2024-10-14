@@ -30,7 +30,7 @@ impl<T: Clone> Array2D<T> {
     if row_end > self.rows {
       panic!("Array2D row indices out of bounds (index {}..{} vs. size {})", row_start, row_end, self.rows);
     }
-    if col_end > self.rows {
+    if col_end > self.cols {
       panic!("Array2D column indices out of bounds (index {}..{} vs. size {})", col_start, col_end, self.cols);
     }
 

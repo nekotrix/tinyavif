@@ -184,3 +184,15 @@ pub fn floor_log2<T: UnsignedInt>(value: T) -> u32 {
 pub fn ceil_log2<T: UnsignedInt>(value: T) -> u32 {
   value.ceil_log2()
 }
+
+// Extract the probability of a single symbol from a CDF
+pub fn get_prob(symbol: usize, cdf: &[u16]) -> u16 {
+  if symbol == 0 {
+    cdf[0]
+  } else if symbol == cdf.len() {
+    // Account for the implicit extra element 32768 on the end of the CDF
+    32768 - cdf[symbol - 1]
+  } else {
+    cdf[symbol] - cdf[symbol - 1]
+  }
+}
