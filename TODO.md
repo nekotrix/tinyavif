@@ -1,8 +1,5 @@
 # Pathway toward an actual encoder
 
-* Support modified partition syntax at right/bottom edges of frame
-  * Remember that the image is always padded to a multiple of 8x8 pixels
-
 * Maintain an encoder-side idea of what the reconstructed output should be,
   and dump that to a file for debugging
 
@@ -13,9 +10,7 @@
 * Hook up transform pipeline
   load source => subtract pred => txfm => quantize => inverse txfm => add to pred => store to recon
 
-* Hook up proper coefficient syntax for luma
-
-* Then do the same for chroma
+* Hook up chroma transforms + coefficient encoding
   * Requires implementing 4x4 forward and inverse transforms
 
 * Select transform-related CDFs based on qindex
