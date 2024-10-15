@@ -4,6 +4,7 @@ use std::fs::File;
 
 use crate::array2d::Array2D;
 use crate::bitcode::BitWriter;
+use crate::cdf::*;
 use crate::consts::*;
 use crate::entropycode::EntropyWriter;
 use crate::enums::*;
@@ -25,8 +26,6 @@ pub struct AV1Encoder {
   y_crop_height: usize,
   uv_crop_width: usize,
   uv_crop_height: usize,
-
-  qindex: u8
 }
 
 // "Mode info" unit - a struct representing the state of a single 4x4 luma pixel unit.
@@ -54,6 +53,8 @@ pub struct TileEncoder<'a> {
   encoder: &'a AV1Encoder,
   bitstream: EntropyWriter,
 
+  base_qindex: u8,
+
   // Mode info per 4x4 luma pixel unit
   mode_info: Array2D<ModeInfo>,
 
@@ -66,14 +67,23 @@ pub struct TileEncoder<'a> {
   recon: Frame,
 }
 
+fn get_qctx(base_qindex: u8) -> u8 {
+  if base_qindex <= 20 {
+    0
+  } else if base_qindex <= 60 {
+    1
+  } else if base_qindex <= 120 {
+    2
+  } else {
+    3
+  }
+}
+
 impl AV1Encoder {
-  pub fn new(y_crop_width: usize, y_crop_height: usize, qindex: u8) -> Self {
+  pub fn new(y_crop_width: usize, y_crop_height: usize) -> Self {
     // Check limits imposed by AV1
     assert!(0 < y_crop_width && y_crop_width <= 65536);
     assert!(0 < y_crop_height && y_crop_height <= 65536);
-
-    // We don't currently support lossless mode
-    assert!(qindex != 0);
 
     let y_width = y_crop_width.next_multiple_of(8);
     let y_height = y_crop_height.next_multiple_of(8);
@@ -93,7 +103,6 @@ impl AV1Encoder {
       y_crop_height: y_crop_height,
       uv_crop_width: uv_crop_width,
       uv_crop_height: uv_crop_height,
-      qindex: qindex
     }
   }
 
@@ -134,7 +143,7 @@ impl AV1Encoder {
     return w.finalize(true);
   }
   
-  pub fn generate_frame_header(&self, add_trailing_one_bit: bool) -> Box<[u8]> {
+  pub fn generate_frame_header(&self, base_qindex: u8, add_trailing_one_bit: bool) -> Box<[u8]> {
     let mut w = BitWriter::new();
     
     w.write_bit(1); // Disable CDF updates
@@ -154,7 +163,7 @@ impl AV1Encoder {
       w.write_bit(0); // 1 tile row
     }
   
-    w.write_bits(self.qindex as u64, 8);
+    w.write_bits(base_qindex as u64, 8);
   
     w.write_bits(0, 3); // No frame-level delta-qs (three bits: Y DC, UV DC, UV AC)
     w.write_bit(0); // Don't use quantizer matrices
@@ -176,10 +185,13 @@ impl AV1Encoder {
     return w.finalize(add_trailing_one_bit);
   }
 
-  pub fn encode_image(&self, source: &Frame) -> Box<[u8]> {
+  pub fn encode_image(&self, source: &Frame, base_qindex: u8) -> Box<[u8]> {
     // Encode a single tile for now
     assert!(source.y().width() == self.y_width);
     assert!(source.y().height() == self.y_height);
+
+    // We don't currently support lossless mode
+    assert!(base_qindex != 0);
 
     // Allocate MI array
     let mi_rows = self.y_height / 4;
@@ -188,9 +200,10 @@ impl AV1Encoder {
     let mut tile = TileEncoder {
       encoder: &self,
       bitstream: EntropyWriter::new(),
+      base_qindex: base_qindex,
       mode_info: Array2D::zeroed(mi_rows, mi_cols),
       source: source,
-      recon: Frame::new(self.y_height, self.y_width)
+      recon: Frame::new(self.y_height, self.y_width),
     };
 
     tile.encode();
@@ -220,7 +233,7 @@ impl<'a> TileEncoder<'a> {
   }
 
   fn encode_partition(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
-    println!("Encoding {:2}x{:2} partition at mi_row={:3}, mi_col={:3}", bsize, bsize, mi_row, mi_col);
+    //println!("Encoding {:2}x{:2} partition at mi_row={:3}, mi_col={:3}", bsize, bsize, mi_row, mi_col);
     // Always split down to 8x8 blocks
     // For each partition symbol, the context depends on whether the above and/or left
     // blocks are partitioned to a size smaller than what we're currently considering.
@@ -237,8 +250,7 @@ impl<'a> TileEncoder<'a> {
     //   Top edge: context = 2
     //   Everywhere else: context = 3
     if bsize == 8 {
-      let cdf = [19132, 25510, 30392];
-      self.bitstream.write_symbol(0, &cdf); // PARTITION_NONE
+      self.bitstream.write_symbol(0, &partition_8x8_cdf); // PARTITION_NONE
       self.encode_block(mi_row, mi_col, bsize);
     } else {
       let mi_rows = self.mode_info.rows();
@@ -247,45 +259,27 @@ impl<'a> TileEncoder<'a> {
       let sub_rows = if (mi_row + bsize/8) < mi_rows { 2 } else { 1 };
       let sub_cols = if (mi_col + bsize/8) < mi_cols { 2 } else { 1 };
 
-      let all_cdfs = [
-        // 16x16
-        [
-          [15597, 20929, 24571, 26706, 27664, 28821, 29601, 30571, 31902],
-          [7925, 11043, 16785, 22470, 23971, 25043, 26651, 28701, 29834],
-          [5414, 13269, 15111, 20488, 22360, 24500, 25537, 26336, 32117],
-          [2662, 6362, 8614, 20860, 23053, 24778, 26436, 27829, 31171]
-        ],
-        // 32x32
-        [
-          [18462, 20920, 23124, 27647, 28227, 29049, 29519, 30178, 31544],
-          [7689, 9060, 12056, 24992, 25660, 26182, 26951, 28041, 29052],
-          [6015, 9009, 10062, 24544, 25409, 26545, 27071, 27526, 32047],
-          [1394, 2208, 2796, 28614, 29061, 29466, 29840, 30185, 31899]
-        ],
-        // 64x64
-        [
-          [20137, 21547, 23078, 29566, 29837, 30261, 30524, 30892, 31724],
-          [6732, 7490, 9497, 27944, 28250, 28515, 28969, 29630, 30104],
-          [5945, 7663, 8348, 28683, 29117, 29749, 30064, 30298, 32238],
-          [870, 1212, 1487, 31198, 31394, 31574, 31743, 31881, 32332]
-        ]
-      ];
-      let bsize_ctx = match bsize {
-        16 => 0,
-        32 => 1,
-        64 => 2,
-        _ => panic!("Reached an unexpected partition size")
-      };
       let above_ctx = if mi_row > 0 { 1 } else { 0 };
       let left_ctx = if mi_col > 0 { 1 } else { 0 };
       let ctx = 2 * left_ctx + above_ctx;
 
-      let cdf = &all_cdfs[bsize_ctx][ctx];
+      let cdf = match bsize {
+        16 => &partition_16x16_cdf[ctx],
+        32 => &partition_32x32_cdf[ctx],
+        64 => &partition_64x64_cdf[ctx],
+        _ => panic!("Reached an unexpected partition size")
+      };
 
       if sub_rows > 1 && sub_cols > 1 {
-        self.bitstream.write_symbol(3, cdf); // PARTITION_SPLIT
+        // Normal case, all partitions are available
+        // Always choose PARTITION_SPLIT
+        self.bitstream.write_symbol(3, cdf);
       } else if sub_cols > 1 {
-        // Derive a binary CDF to pick between PARTITION_HORZ (0) or PARTITION_SPLIT (1)
+        // The bottom edge of the frame falls in the top half of this partition, so
+        // we must split horizontally. The only useful choice is whether to split the
+        // in-bounds part in half vertically.
+        //
+        // Thus we use a binary CDF to pick between PARTITION_HORZ (0) or PARTITION_SPLIT (1).
         // The probability of PARTITION_SPLIT is calculated by summing the probabilities
         // of the following options using the original CDF:
         let p_split = get_prob(Partition::VERT as usize, cdf) +
@@ -296,7 +290,13 @@ impl<'a> TileEncoder<'a> {
                       get_prob(Partition::VERT_4 as usize, cdf);
         self.bitstream.write_bit(1, 32768 - p_split);
       } else if sub_rows > 1 {
-        // Derive a binary CDF to pick between PARTITION_VERT (0) or PARTITION_SPLIT (1)
+        // The right edge of the frame falls in the left half of this partition, so
+        // we must split vertically. The only useful choice is whether to split the
+        // in-bounds part in half horizontally.
+        //
+        // Thus we use a binary CDF to pick between PARTITION_VERT (0) or PARTITION_SPLIT (1).
+        // The probability of PARTITION_SPLIT is calculated by summing the probabilities
+        // of the following options using the original CDF:
         let p_split = get_prob(Partition::HORZ as usize, cdf) +
                       get_prob(Partition::SPLIT as usize, cdf) +
                       get_prob(Partition::HORZ_A as usize, cdf) +
@@ -305,7 +305,8 @@ impl<'a> TileEncoder<'a> {
                       get_prob(Partition::HORZ_4 as usize, cdf);
         self.bitstream.write_bit(1, 32768 - p_split);
       } else {
-        // PARTITION_SPLIT is forced, so no need to encode anything
+        // The bottom-right corner of the frame falls in the top-left quadrant of this partition,
+        // so PARTITION_SPLIT is forced. Therefore we don't need to signal anything.
       }
 
       let offset = bsize / 8;
@@ -360,11 +361,15 @@ impl<'a> TileEncoder<'a> {
 
     // Make sure there are the right number of coefficients
     let txsize = if plane > 0 { bsize/2 } else { bsize };
+    let txs_ctx = if txsize == 8 { 1 } else { 0 };
     let num_coeffs = txsize * txsize;
     assert!(coeffs.rows() == txsize);
     assert!(coeffs.cols() == txsize);
 
-    let scan: &[(u8, u8)] = if txsize == 4 { &default_scan_4x4 } else { &default_scan_8x8 };
+    let scan: &[(u8, u8)] = scan_order_2d[txs_ctx];
+
+    let qctx = get_qctx(self.base_qindex);
+    assert!(qctx == 3); // For now
 
     // Find the "end of block" location
     // This is one past the last nonzero coefficient, or 0 if all coeffs are zero
@@ -392,25 +397,6 @@ impl<'a> TileEncoder<'a> {
       self.bitstream.write_bool(all_zero, 2713);
       return;
     }
-
-    // Note on contexts:
-    // Coeff symbols have an implicit qindex-based context, which is:
-    //  if   qindex <= 20  then qctx = 0
-    //  elif qindex <= 60  then qctx = 1
-    //  elif qindex <= 120 then qctx = 2
-    //  else                    qctx = 3 (this is the selected qindex for now)
-    //
-    // This context is selected at each past-independent frame, and then held
-    // across any dependent frames. In our case, where every frame is a key frame,
-    // this means that it depends on the frame-level base_qindex.
-    //
-    // Then three other, more dynamic, values are factored into the context:
-    // * Transform size, which in this case is 1 (8x8) for luma and 0 (4x4) for chroma
-    // * Whether the current plane is luma or chroma (the "plane type")
-    // * Surrounding coefficient values
-    // The last two are bundled together in a complex way into a value we'll call
-    // the "main context"
-    assert!(self.encoder.qindex > 120);
 
     // For luma, for the all_zero symbol, the main context in theory has a complex dependency
     // on the nearby transform coefficients, but it's short-circuited to always be 0 for
@@ -677,7 +663,7 @@ impl<'a> TileEncoder<'a> {
   fn encode_block(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
     assert!(bsize == 8);
 
-    println!("Encoding 8x8 block at mi_row={:3}, mi_col={:3}", mi_row, mi_col);
+    //println!("Encoding 8x8 block at mi_row={:3}, mi_col={:3}", mi_row, mi_col);
 
     // Allocate a ModeInfo struct to hold information about the current block
     let mut this_mi = ModeInfo::zeroed();
@@ -686,19 +672,19 @@ impl<'a> TileEncoder<'a> {
     // defaulting to false if those aren't present
     // As we always set skip = false, this context is always 0
     // skip = false
-    self.bitstream.write_symbol(0, &[31671]);
+    self.bitstream.write_symbol(0, &skip_cdf);
   
     // For intra_frame_y_mode, the context depends on the above and left Y modes,
     // defaulting to DC_PRED if those aren't present
     // As we always choose DC_PRED, this context is always 0
     // intra_frame_y_mode(context=0,0) = DC_PRED
-    self.bitstream.write_symbol(0, &[15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466]);
+    self.bitstream.write_symbol(0, &y_mode_cdf);
 
     // For uv_mode, the context is simply y_mode combined with whether CFL is allowed
     // Here the y mode is always DC_PRED and CFL is always allowed for 8x8 blocks,
     // so we always end up with the same context
     // uv_mode(context=0, CFL allowed) = DC_PRED
-    self.bitstream.write_symbol(0, &[10407, 11208, 12900, 13181, 13823, 14175, 14899, 15656, 15986, 20086, 20995, 22455, 24212]);
+    self.bitstream.write_symbol(0, &uv_mode_cdf);
 
     // Encode residuals
     for plane in 0..1 {
@@ -712,13 +698,13 @@ impl<'a> TileEncoder<'a> {
       let mut residual = compute_residual(self.source.plane(plane).pixels(),
                                           self.recon.plane(plane).pixels(),
                                           y0, x0, h, w);
-      quantize(&mut residual, self.encoder.qindex);
+      quantize(&mut residual, self.base_qindex);
 
       // Encode the quantized coefficients while we have them,
       // before we consume them to finalize the reconstructed image
       self.encode_coeffs(0, mi_row, mi_col, bsize, &mut this_mi, &residual);
 
-      dequantize(&mut residual, self.encoder.qindex);
+      dequantize(&mut residual, self.base_qindex);
       apply_residual(self.recon.plane_mut(plane).pixels_mut(), residual, y0, x0, h, w);
     }
 

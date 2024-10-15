@@ -15,6 +15,7 @@
 mod array2d;
 mod av1_encoder;
 mod bitcode;
+mod cdf;
 mod consts;
 mod entropycode;
 mod enums;
@@ -199,7 +200,7 @@ fn pack_avif(av1_data: &[u8], crop_width: usize, crop_height: usize) -> Box<[u8]
 }
 
 fn main() {
-  let qindex = 121;
+  let base_qindex = 121;
 
   let source_file = File::open("bus_cif.y4m").unwrap();
   let mut y4m = Y4MReader::new(source_file).unwrap();
@@ -209,10 +210,10 @@ fn main() {
   let crop_height = source.y().crop_height();
 
   // Generate AV1 data
-  let encoder = AV1Encoder::new(crop_width, crop_height, qindex);
+  let encoder = AV1Encoder::new(crop_width, crop_height);
   let sequence_header = encoder.generate_sequence_header();
-  let frame_header = encoder.generate_frame_header(false);
-  let tile_data = encoder.encode_image(&source);
+  let frame_header = encoder.generate_frame_header(base_qindex, false);
+  let tile_data = encoder.encode_image(&source, base_qindex);
 
   // Pack into higher-level structure and write out
   let av1_data = pack_obus(&sequence_header, &frame_header, &tile_data, true);

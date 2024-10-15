@@ -51,7 +51,7 @@ impl EntropyWriter {
   // We do not store these values in the cdf array, and instead handle these cases
   // with ifs in this function
   pub fn write_symbol(&mut self, symbol: usize, cdf: &[u16]) {
-    println!("  Symbol({}, CDF = {:?})", symbol, cdf);
+    //println!("  Symbol({}, CDF = {:?})", symbol, cdf);
     let num_symbols = cdf.len() + 1;
     let inv_hi = if symbol == num_symbols - 1 { 0 } else { 32768 - (cdf[symbol] as u32) };
 
@@ -125,7 +125,7 @@ impl EntropyWriter {
 
   // Encode a given value using a Golomb code
   pub fn write_golomb(&mut self, mut value: u32) {
-    println!("  Golomb({})", value);
+    //println!("  Golomb({})", value);
     // Because the "standard" Golomb code cannot represent 0, we actually Golomb-code `value + 1`
     value += 1;
 

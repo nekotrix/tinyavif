@@ -1,3 +1,7 @@
+// Number of transform sizes that this code supports
+// Currently only 2: 4x4 (for chroma) and 8x8 (for luma)
+const SUPPORTED_TX_SIZES: usize = 2;
+
 // Scan orders for 2D (ie. not H_* or V_*) transforms
 // The input to this is an index in coefficient scan order,
 // the output is an index (row * tx_width + col) into the quantized
@@ -7,7 +11,6 @@
 // This is *different* to the tables in libaom, which are transposed for some reason.
 // Correspondingly, the forward/inverse transforms in libaom have an extra
 // transpose operation at the end/start (respectively) to fix the coefficient order.
-// Why? I have no idea
 
 // 4x4
 pub const default_scan_4x4: [(u8, u8); 16] = [
@@ -25,6 +28,11 @@ pub const default_scan_8x8: [(u8, u8); 64] = [
   (3, 5), (2, 6), (1, 7), (2, 7), (3, 6), (4, 5), (5, 4), (6, 3),
   (7, 2), (7, 3), (6, 4), (5, 5), (4, 6), (3, 7), (4, 7), (5, 6),
   (6, 5), (7, 4), (7, 5), (6, 6), (5, 7), (6, 7), (7, 6), (7, 7)
+];
+
+pub const scan_order_2d: [&[(u8, u8)]; SUPPORTED_TX_SIZES] = [
+  &default_scan_4x4,
+  &default_scan_8x8,
 ];
 
 // Offsets of coefficients which are looked at to determine
@@ -49,12 +57,14 @@ pub const Coeff_Base_Ctx_Offset_8x8: [[u8; 5]; 5] = [
 // av1_cospi_arr[i][j] = (int)round(cos(PI*j/128) * (1<<(cos_bit_min+i)));
 pub const av1_cospi_arr_data: [[i32; 64]; 4] = [
   // cos_bit = 10
+  // Unused currently (used in AV1 for some large transforms)
   [ 1024, 1024, 1023, 1021, 1019, 1016, 1013, 1009, 1004, 999, 993, 987, 980,
     972,  964,  955,  946,  936,  926,  915,  903,  891,  878, 865, 851, 837,
     822,  807,  792,  775,  759,  742,  724,  706,  688,  669, 650, 630, 610,
     590,  569,  548,  526,  505,  483,  460,  438,  415,  392, 369, 345, 321,
     297,  273,  249,  224,  200,  175,  150,  125,  100,  75,  50,  25 ],
   // cos_bit = 11
+  // Unused currently (used in AV1 for some large transforms)
   [ 2048, 2047, 2046, 2042, 2038, 2033, 2026, 2018, 2009, 1998, 1987,
     1974, 1960, 1945, 1928, 1911, 1892, 1872, 1851, 1829, 1806, 1782,
     1757, 1730, 1703, 1674, 1645, 1615, 1583, 1551, 1517, 1483, 1448,
@@ -62,6 +72,7 @@ pub const av1_cospi_arr_data: [[i32; 64]; 4] = [
     965,  921,  876,  830,  784,  737,  690,  642,  595,  546,  498,
     449,  400,  350,  301,  251,  201,  151,  100,  50 ],
   // cos_bit = 12
+  // Used for all inverse transforms
   [ 4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017, 3996, 3973,
     3948, 3920, 3889, 3857, 3822, 3784, 3745, 3703, 3659, 3612, 3564,
     3513, 3461, 3406, 3349, 3290, 3229, 3166, 3102, 3035, 2967, 2896,
@@ -69,6 +80,7 @@ pub const av1_cospi_arr_data: [[i32; 64]; 4] = [
     1931, 1842, 1751, 1660, 1567, 1474, 1380, 1285, 1189, 1092, 995,
     897,  799,  700,  601,  501,  401,  301,  201,  101 ],
   // cos_bit = 13
+  // Used for 4x4 and 8x8 forward transforms
   [ 8192, 8190, 8182, 8170, 8153, 8130, 8103, 8071, 8035, 7993, 7946,
     7895, 7839, 7779, 7713, 7643, 7568, 7489, 7405, 7317, 7225, 7128,
     7027, 6921, 6811, 6698, 6580, 6458, 6333, 6203, 6070, 5933, 5793,
@@ -77,26 +89,32 @@ pub const av1_cospi_arr_data: [[i32; 64]; 4] = [
     1795, 1598, 1401, 1202, 1003, 803,  603,  402,  201 ]
 ];
 
-pub const av1_txfm_stages: [usize; 2] = [ 4, 6 ];
+pub const av1_txfm_stages: [usize; SUPPORTED_TX_SIZES] = [
+  4, // 4X4
+  6, // 8X8
+];
 
-pub const av1_txfm_fwd_shift: [[i32; 3]; 2] = [
+pub const av1_txfm_fwd_shift: [[i32; 3]; SUPPORTED_TX_SIZES] = [
   [ 2,  0, 0 ], // 4x4
   [ 2, -1, 0 ], // 8x8
 ];
 
 // Maximum range of values after each forward transform stage,
 // rounded up to powers of 2
-pub const av1_txfm_fwd_range_mult2: [[i32; 6]; 2] = [
-  [ 0, 2, 3, 3, 0, 0 ],
-  [ 0, 2, 4, 5, 5, 5 ],
+pub const av1_txfm_fwd_range_mult2: [[i32; 6]; SUPPORTED_TX_SIZES] = [
+  [ 0, 2, 3, 3, 0, 0 ], // 4x4
+  [ 0, 2, 4, 5, 5, 5 ], // 8x8
 ];
 
-pub const av1_txfm_inv_shift: [[i32; 2]; 2] = [
-  [  0, -4 ],
-  [ -1, -4 ],
+pub const av1_txfm_inv_shift: [[i32; 2]; SUPPORTED_TX_SIZES] = [
+  [  0, -4 ], // 4x4
+  [ -1, -4 ], // 8x8
 ];
 
-pub const av1_txfm_inv_start_range: [i32; 2] = [ 5, 6 ];
+pub const av1_txfm_inv_start_range: [i32; SUPPORTED_TX_SIZES] = [
+  5, // 4x4
+  6, // 8x8
+];
 
 // DC and AC quantizers for a given qindex
 pub const qindex_to_dc_q: [i32; 256] = [
@@ -118,7 +136,7 @@ pub const qindex_to_dc_q: [i32; 256] = [
   447,  454,  461,  467,  475, 482, 489, 497, 505, 513, 522,  530,  539,  549,
   559,  569,  579,  590,  602, 614, 626, 640, 654, 668, 684,  700,  717,  736,
   755,  775,  796,  819,  843, 869, 896, 925, 955, 988, 1022, 1058, 1098, 1139,
-  1184, 1232, 1282, 1336,
+  1184, 1232, 1282, 1336
 ];
 
 pub const qindex_to_ac_q: [i32; 256] = [
@@ -141,5 +159,5 @@ pub const qindex_to_ac_q: [i32; 256] = [
   743,  757,  771,  786,  801,  816,  832,  848,  864,  881,  898,  915,  933,
   951,  969,  988,  1007, 1026, 1046, 1066, 1087, 1108, 1129, 1151, 1173, 1196,
   1219, 1243, 1267, 1292, 1317, 1343, 1369, 1396, 1423, 1451, 1479, 1508, 1537,
-  1567, 1597, 1628, 1660, 1692, 1725, 1759, 1793, 1828,
+  1567, 1597, 1628, 1660, 1692, 1725, 1759, 1793, 1828
 ];
