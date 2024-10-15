@@ -57,6 +57,36 @@ fn half_btf(w0: i32, in0: i32, w1: i32, in1: i32, cos_bit: u32) -> i32 {
   return (tmp.wrapping_add(offset)) >> cos_bit;
 }
 
+// In-place 4-point forward DCT
+fn fwd_dct4(arr: &mut [i32], cos_bit: u32, _stage_range: &[u32]) {
+  assert!(arr.len() == 4);
+
+  let cospi = cospi_arr(cos_bit);
+
+  let stage1 = [
+    arr[0] + arr[3],
+    arr[1] + arr[2],
+    -arr[2] + arr[1],
+    -arr[3] + arr[0]
+  ];
+
+  let stage2 = [
+    half_btf(cospi[32], stage1[0], cospi[32], stage1[1], cos_bit),
+    half_btf(-cospi[32], stage1[1], cospi[32], stage1[0], cos_bit),
+    half_btf(cospi[48], stage1[2], cospi[16], stage1[3], cos_bit),
+    half_btf(cospi[48], stage1[3], -cospi[16], stage1[2], cos_bit)
+  ];
+
+  let stage3 = [
+    stage2[0],
+    stage2[2],
+    stage2[1],
+    stage2[3]
+  ];
+
+  arr.copy_from_slice(&stage3);
+}
+
 // In-place 8-point forward DCT
 fn fwd_dct8(arr: &mut [i32], cos_bit: u32, _stage_range: &[u32]) {
   assert!(arr.len() == 8);
@@ -121,6 +151,37 @@ fn fwd_dct8(arr: &mut [i32], cos_bit: u32, _stage_range: &[u32]) {
   ];
 
   arr.copy_from_slice(&stage5);
+}
+
+// In-place 4-point inverse DCT
+fn inv_dct4(arr: &mut [i32], cos_bit: u32, stage_range: &[u32]) {
+  assert!(arr.len() == 4);
+
+  let cospi = cospi_arr(cos_bit);
+  // TODO: Range checks
+
+  let stage1 = [
+    arr[0],
+    arr[2],
+    arr[1],
+    arr[3]
+  ];
+
+  let stage2 = [
+    half_btf(cospi[32], stage1[0], cospi[32], stage1[1], cos_bit),
+    half_btf(cospi[32], stage1[0], -cospi[32], stage1[1], cos_bit),
+    half_btf(cospi[48], stage1[2], -cospi[16], stage1[3], cos_bit),
+    half_btf(cospi[16], stage1[2], cospi[48], stage1[3], cos_bit)
+  ];
+
+  let stage3 = [
+    clamp_value(stage2[0] + stage2[3], stage_range[3]),
+    clamp_value(stage2[1] + stage2[2], stage_range[3]),
+    clamp_value(stage2[1] - stage2[2], stage_range[3]),
+    clamp_value(stage2[0] - stage2[3], stage_range[3])
+  ];
+
+  arr.copy_from_slice(&stage3);
 }
 
 // In-place 8-point inverse DCT
@@ -196,14 +257,13 @@ pub fn fwd_txfm2d(residual: &mut Array2D<i32>, txh: usize, txw: usize) {
   assert!(residual.cols() == txw);
 
   let txsz_idx;
-  let fwd_txfm;
+  let fwd_txfm: &dyn Fn(&mut [i32], u32, &[u32]);
   if txh == 8 && txw == 8 {
     txsz_idx = 1;
     fwd_txfm = &fwd_dct8;
   } else if txh == 4 && txw == 4 {
-    //txsz_idx = 0;
-    //fwd_txfm = &fwd_dct4;
-    todo!();
+    txsz_idx = 0;
+    fwd_txfm = &fwd_dct4;
   } else {
     todo!();
   }
@@ -252,14 +312,13 @@ pub fn inv_txfm2d(residual: &mut Array2D<i32>, txh: usize, txw: usize) {
   assert!(residual.cols() == txw);
 
   let txsz_idx;
-  let inv_txfm;
+  let inv_txfm: &dyn Fn(&mut [i32], u32, &[u32]);
   if txh == 8 && txw == 8 {
     txsz_idx = 1;
     inv_txfm = &inv_dct8;
   } else if txh == 4 && txw == 4 {
-    //txsz_idx = 0;
-    //inv_txfm = &inv_dct4;
-    todo!();
+    txsz_idx = 0;
+    inv_txfm = &inv_dct4;
   } else {
     todo!();
   }

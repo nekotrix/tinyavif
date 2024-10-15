@@ -67,7 +67,7 @@ pub struct TileEncoder<'a> {
   recon: Frame,
 }
 
-fn get_qctx(base_qindex: u8) -> u8 {
+fn get_qctx(base_qindex: u8) -> usize {
   if base_qindex <= 20 {
     0
   } else if base_qindex <= 60 {
@@ -318,43 +318,8 @@ impl<'a> TileEncoder<'a> {
     }
   }
 
-  fn dc_sign_ctx(&self, plane: usize, mi_row: usize, mi_col: usize, bsize: usize) -> usize {
-    if plane != 0 {
-      todo!();
-    }
-
-    let mi_rows = self.mode_info.rows();
-    let mi_cols = self.mode_info.cols();
-
-    // The DC sign context depends on whether there are more +ve signs, more -ve signs,
-    // or an equal number, among all above and left 4x4 units.
-    // As we store the DC sign in ModeInfo::dc_sign as -1 / 0 / +1, we can do this by
-    // simply summing the DC signs of all surrounding blocks
-    let mut net_neighbour_sign = 0;
-    if mi_row > 0 {
-      for above_col in mi_col .. min(mi_col + bsize/4, mi_cols) {
-        net_neighbour_sign += self.mode_info[mi_row - 1][above_col].dc_sign[plane]
-      }
-    }
-    if mi_col > 0 {
-      for left_row in mi_row .. min(mi_row + bsize/4, mi_rows) {
-        net_neighbour_sign += self.mode_info[left_row][mi_col - 1].dc_sign[plane]
-      }
-    }
-
-    // Map result to the appropriate context
-    if net_neighbour_sign == 0 {
-      return 0;
-    } else if net_neighbour_sign < 0 {
-      return 1;
-    } else {
-      return 2;
-    }
-  }
-
   fn encode_coeffs(&mut self, plane: usize, mi_row: usize, mi_col: usize, bsize: usize, this_mi: &mut ModeInfo,
                    coeffs: &Array2D<i32>) {
-    // We only handle 8x8 luma blocks for now
     if bsize != 8 {
       todo!();
     }
@@ -369,7 +334,8 @@ impl<'a> TileEncoder<'a> {
     let scan: &[(u8, u8)] = scan_order_2d[txs_ctx];
 
     let qctx = get_qctx(self.base_qindex);
-    assert!(qctx == 3); // For now
+
+    let ptype = if plane == 0 { 0 } else { 1 };
 
     // Find the "end of block" location
     // This is one past the last nonzero coefficient, or 0 if all coeffs are zero
@@ -387,34 +353,44 @@ impl<'a> TileEncoder<'a> {
 
     let all_zero = eob == 0;
 
-    if plane != 0 {
-      // For chroma, we don't signal any coefficients for now
-      // This ends up meaning that the main context is always 7
-      if ! all_zero {
-        todo!();
+    // The all_zero symbol has a complex dependency on the nearby transform coefficients.
+    // For luma, there is a special case where this is short-circuited to 0 for max-size
+    // transforms (ie, transform size == block size), so we can ignore the complex logic.
+    // But for chroma it is mandatory.
+    let all_zero_ctx = if plane == 0 {
+      0
+    } else {
+      let mut above = false;
+      let mut left = false;
+      // In theory we need to scan all blocks above and left of the current block here
+      // However, because all blocks are currently 8x8, there's always exactly one
+      // block above and one block left
+      if mi_row > 0 {
+        let above_block = &self.mode_info[mi_row - 1][mi_col];
+        above |= above_block.level_ctx[plane] != 0;
+        above |= above_block.dc_sign[plane] != 0;
       }
-      // all_zero(u/v, context=3,0,7) = 1
-      self.bitstream.write_bool(all_zero, 2713);
-      return;
-    }
+      if mi_col > 0 {
+        let left_block = &self.mode_info[mi_row][mi_col - 1];
+        left |= left_block.level_ctx[plane] != 0;
+        left |= left_block.dc_sign[plane] != 0;
+      }
+      7 + (above as usize) + (left as usize)
+    };
 
-    // For luma, for the all_zero symbol, the main context in theory has a complex dependency
-    // on the nearby transform coefficients, but it's short-circuited to always be 0 for
-    // max-size transforms (ie, transform size == block size), which saves us a lot of work!
-    // all_zero(y, context=3,1,0) = 0
-    self.bitstream.write_bool(all_zero, 31903);
+    self.bitstream.write_symbol(all_zero as usize, &all_zero_cdf[qctx][txs_ctx][all_zero_ctx]);
     if all_zero {
       return;
     }
 
-    // Transform type
+    // Transform type - only coded for luma
     // As we selected the reduced transform set in the frame header,
     // we end up looking at the TX_SET_INTRA_2 set, which consists of
     // { IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST }, in that order.
     // We want DCT_DCT, so we want to encode index 1.
-    // The context here consists of the TX size (rounded down to a square size,
-    // but 8x8 is already square) and the intra mode, which here is always DC_PRED
-    self.bitstream.write_symbol(1, &[6554, 13107, 19661, 26214]);
+    if plane == 0 {
+      self.bitstream.write_symbol(1, &tx_type_cdf);
+    }
 
     // Number of coefficients, encoded as a logarithmic class + value within that class
     // Here, the contexts are qindex, plane type, and (for 16x16 and smaller)
@@ -430,26 +406,30 @@ impl<'a> TileEncoder<'a> {
     // up to a maximum class which depends on the transform size
     // For 4x4 the largest class is class 4 (EOB = 9-16), for 8x8 it's class 6 (EOB = 33-64)
     let eob_class = ceil_log2(eob) as usize;
-    self.bitstream.write_symbol(eob_class, &[6307, 7541, 12060, 16358, 22553, 27865]);
+    let eob_class_cdf: &[u16] = if plane == 0 {
+      &eob_class_64_cdf[qctx][ptype]
+    } else {
+      &eob_class_16_cdf[qctx][ptype]
+    };
+    self.bitstream.write_symbol(eob_class, eob_class_cdf);
+
     if eob_class > 1 {
-      // EOB classes 2+ require extra bits
-      // The first extra bit is coded with a special CDF, the rest are literal bits
-      // Context = (qctx, tx size, ptype, eob_class - 2)
-      // For 8x8 and luma, this gives:
-      let first_extra_bit_cdf = [
-        [20238],
-        [21057],
-        [19159],
-        [22337],
-        [20159]
-      ];
       let eob_class_low = (1 << (eob_class - 1)) + 1;
       let eob_class_hi = 1 << eob_class;
       assert!(eob_class_low <= eob && eob <= eob_class_hi);
 
+      // EOB classes 2+ require extra bits
+      // The first extra bit is coded with a special CDF, the rest are literal bits
+      // Context = (qctx, tx size, ptype, eob_class - 2)
+      // For 8x8 and luma, this gives:
+      let first_extra_bit_cdf = if plane == 0 {
+        &eob_extra_8x8_cdf[qctx][ptype][eob_class - 2]
+      } else {
+        &eob_extra_4x4_cdf[qctx][ptype][eob_class - 2]
+      };
       let eob_shift = eob_class - 2;
       let extra_bit = ((eob - eob_class_low) >> eob_shift) & 1;
-      self.bitstream.write_symbol(extra_bit, &first_extra_bit_cdf[eob_class - 2]);
+      self.bitstream.write_symbol(extra_bit, first_extra_bit_cdf);
 
       // Write any remaining bits as a literal
       // Note: The AV1 decoder spec gives a more detailed process here,
@@ -480,15 +460,9 @@ impl<'a> TileEncoder<'a> {
         } else {
           3
         };
-        let coeff_base_eob_cdf = [
-          [21457, 31043],
-          [31951, 32483],
-          [32153, 32562],
-          [31473, 32215]
-        ];
         assert!(abs_value >= 1);
         let coded_value = min(abs_value - 1, 2);
-        self.bitstream.write_symbol(coded_value, &coeff_base_eob_cdf[base_eob_ctx]);
+        self.bitstream.write_symbol(coded_value, &coeff_base_eob_cdf[qctx][txs_ctx][ptype][base_eob_ctx]);
       } else {
         // Context depends on the base values of coefficients below and to the right,
         // which have already been encoded
@@ -510,52 +484,8 @@ impl<'a> TileEncoder<'a> {
           mag_part + loc_part
         };
 
-        let coeff_base_cdf = [
-          [7754, 16948, 22142],
-          [25670, 32330, 32691],
-          [15663, 29225, 31994],
-          [9878, 23288, 29158],
-          [6419, 17088, 24336],
-          [3859, 11003, 17039],
-          [27562, 32595, 32725],
-          [17575, 30588, 32399],
-          [10819, 24838, 30309],
-          [7124, 18686, 25916],
-          [4479, 12688, 19340],
-          [28385, 32476, 32673],
-          [15306, 29005, 31938],
-          [8937, 21615, 28322],
-          [5982, 15603, 22786],
-          [3620, 10267, 16136],
-          [27280, 32464, 32667],
-          [15607, 29160, 32004],
-          [9091, 22135, 28740],
-          [6232, 16632, 24020],
-          [4047, 11377, 17672],
-          [29220, 32630, 32718],
-          [19650, 31220, 32462],
-          [13050, 26312, 30827],
-          [9228, 20870, 27468],
-          [6146, 15149, 21971],
-          [30169, 32481, 32623],
-          [17212, 29311, 31554],
-          [9911, 21311, 26882],
-          [4487, 13314, 20372],
-          [2570, 7772, 12889],
-          [30924, 32613, 32708],
-          [19490, 30206, 32107],
-          [11232, 23998, 29276],
-          [6769, 17955, 25035],
-          [4398, 12623, 19214],
-          [30609, 32627, 32722],
-          [19370, 30582, 32287],
-          [10457, 23619, 29409],
-          [6443, 17637, 24834],
-          [4645, 13236, 20106],
-          [8192, 16384, 24576]
-        ];
         let coded_value = min(abs_value, 3);
-        self.bitstream.write_symbol(coded_value, &coeff_base_cdf[base_ctx]);
+        self.bitstream.write_symbol(coded_value, &coeff_base_cdf[qctx][txs_ctx][ptype][base_ctx]);
       }
 
       // If coeff_base is 3, we can encode up to 4 symbols to increment the
@@ -586,35 +516,11 @@ impl<'a> TileEncoder<'a> {
           mag_part + loc_part
         };
 
-        let coeff_br_cdf = [
-          [18274, 24813, 27890],
-          [15537, 23149, 27003],
-          [9449, 16740, 21827],
-          [6700, 12498, 17261],
-          [4988, 9866, 14198],
-          [4236, 8147, 11902],
-          [2867, 5860, 8654],
-          [17124, 23171, 26101],
-          [20396, 27477, 30148],
-          [16573, 24629, 28492],
-          [12749, 20846, 25674],
-          [10233, 17878, 22818],
-          [8525, 15332, 20363],
-          [6283, 11632, 16255],
-          [20466, 26511, 29286],
-          [23059, 29174, 31191],
-          [19481, 27263, 30241],
-          [15458, 23631, 28137],
-          [12416, 20608, 25693],
-          [10261, 18011, 23261],
-          [8016, 14655, 19666]
-        ];
-
         // Now encode the coeff_br symbols
         let mut level = 3;
         for _ in 0..4 {
           let coeff_br = min(abs_value - level, 3);
-          self.bitstream.write_symbol(coeff_br as usize, &coeff_br_cdf[br_ctx]);
+          self.bitstream.write_symbol(coeff_br as usize, &coeff_br_cdf[qctx][txs_ctx][ptype][br_ctx]);
           level += coeff_br;
           if coeff_br < 3 {
             break;
@@ -626,16 +532,38 @@ impl<'a> TileEncoder<'a> {
     // Code DC sign + golomb bits
     let dc_coeff = coeffs[0][0];
     if dc_coeff != 0 {
-      // dc_sign(context=3,0,neighbour signs) = 0
-      // TODO: Update to include chroma
+      // The DC sign context depends on whether there are more +ve signs, more -ve signs,
+      // or an equal number, among all above and left 4x4 units. Since we always use 8x8
+      // blocks, there is exactly one above and one left neighbour.
+      //
+      // Also, for the chroma planes, in theory we're only meant to look at the blocks which are "chroma references",
+      // i.e. the ones which contain an MI unit with odd mi_row and mi_col. This matters if we ever support 4x4
+      // block sizes, but as we currently don't, that's just every block.
+      //
+      // Therefore we can simplify the scan given in the spec, into just looking at the single above and single left
+      // block, if they exist.
+      //
+      // As we store the DC sign in ModeInfo::dc_sign as -1 / 0 / +1, we can do this by
+      // simply summing the DC signs of all surrounding blocks
+      let mut net_neighbour_sign = 0;
+      if mi_row > 0 {
+        net_neighbour_sign += self.mode_info[mi_row - 1][mi_col].dc_sign[plane];
+      }
+      if mi_col > 0 {
+        net_neighbour_sign += self.mode_info[mi_row][mi_col - 1].dc_sign[plane];
+      }
+  
+      // Map result to the appropriate context
+      let dc_sign_ctx = if net_neighbour_sign == 0 {
+        0
+      } else if net_neighbour_sign < 0 {
+        1
+      } else {
+        2
+      };
+
       let sign = if dc_coeff < 0 { 1 } else { 0 };
-      let dc_sign_cdf = [
-        [128 * 125],
-        [128 * 102],
-        [128 * 147]
-      ];
-      let dc_sign_ctx = self.dc_sign_ctx(plane, mi_row, mi_col, bsize);
-      self.bitstream.write_symbol(sign, &dc_sign_cdf[dc_sign_ctx]);
+      self.bitstream.write_symbol(sign, &dc_sign_cdf[qctx][ptype][dc_sign_ctx]);
     }
     if abs(dc_coeff) >= 15 {
       self.bitstream.write_golomb(unsigned_abs(dc_coeff) - 15);
@@ -687,7 +615,7 @@ impl<'a> TileEncoder<'a> {
     self.bitstream.write_symbol(0, &uv_mode_cdf);
 
     // Encode residuals
-    for plane in 0..1 {
+    for plane in 0..3 {
       let subsampling = if plane > 0 { 1 } else { 0 };
       let y0 = (mi_row * 4) >> subsampling;
       let x0 = (mi_col * 4) >> subsampling;
@@ -702,18 +630,10 @@ impl<'a> TileEncoder<'a> {
 
       // Encode the quantized coefficients while we have them,
       // before we consume them to finalize the reconstructed image
-      self.encode_coeffs(0, mi_row, mi_col, bsize, &mut this_mi, &residual);
+      self.encode_coeffs(plane, mi_row, mi_col, bsize, &mut this_mi, &residual);
 
       dequantize(&mut residual, self.base_qindex);
       apply_residual(self.recon.plane_mut(plane).pixels_mut(), residual, y0, x0, h, w);
-    }
-
-    // Temporary stuff to generate valid residuals for each plane
-    // TODO: Remove this stuff once the loop above works properly
-    {
-      let uv_coeffs = Array2D::zeroed(4, 4);
-      self.encode_coeffs(1, mi_row, mi_col, bsize, &mut this_mi, &uv_coeffs);
-      self.encode_coeffs(2, mi_row, mi_col, bsize, &mut this_mi, &uv_coeffs);
     }
 
     // Save mode info
@@ -721,10 +641,6 @@ impl<'a> TileEncoder<'a> {
   }
 
   fn dump_recon(&mut self, path: &str) -> Result<(), io::Error> {
-    // Temporary: Fill UV planes to make things gray instead of green
-    self.recon.u_mut().pixels_mut().map(|_, _, _| 128);
-    self.recon.v_mut().pixels_mut().map(|_, _, _| 128);
-
     let mut y4m = Y4MWriter::new(File::create(path)?, self.encoder.y_width, self.encoder.y_height)?;
     y4m.write_frame(&self.recon)?;
     Ok(())

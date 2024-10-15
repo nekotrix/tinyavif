@@ -200,7 +200,7 @@ fn pack_avif(av1_data: &[u8], crop_width: usize, crop_height: usize) -> Box<[u8]
 }
 
 fn main() {
-  let base_qindex = 121;
+  let base_qindex = 100;
 
   let source_file = File::open("bus_cif.y4m").unwrap();
   let mut y4m = Y4MReader::new(source_file).unwrap();

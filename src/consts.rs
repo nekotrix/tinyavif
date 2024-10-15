@@ -1,6 +1,22 @@
+pub const PLANE_TYPES: usize = 2;
+
 // Number of transform sizes that this code supports
 // Currently only 2: 4x4 (for chroma) and 8x8 (for luma)
-const SUPPORTED_TX_SIZES: usize = 2;
+pub const SUPPORTED_TX_SIZES: usize = 2;
+
+// Maximum EOB class among the supported transforms
+// This is class 6, indicating that the EOB is in [33, 64], for an 8x8 transform
+pub const MAX_SUPPORTED_EOB_CLASS: usize = 6;
+
+// Values used in CDF sizes
+pub const TOKEN_CDF_Q_CTXS: usize = 4;
+
+pub const TXB_SKIP_CONTEXTS: usize = 13;
+
+pub const COEFF_BASE_CONTEXTS: usize = 26; // for 2d transforms; there are a separate set of 16 contexts for 1d transforms
+pub const COEFF_BASE_EOB_CONTEXTS: usize = 4;
+pub const COEFF_BR_CONTEXTS: usize = 21;
+pub const DC_SIGN_CONTEXTS: usize = 3;
 
 // Scan orders for 2D (ie. not H_* or V_*) transforms
 // The input to this is an index in coefficient scan order,

@@ -51,7 +51,6 @@ pub fn compute_residual(source: &Array2D<u8>, pred: &Array2D<u8>,
     |i, j| (source[y0 + i][x0 + j] as i32) - (pred[y0 + i][x0 + j] as i32)
   );
 
-  // TODO: Support more transform sizes and types
   fwd_txfm2d(&mut residual, h, w);
 
   return residual;
