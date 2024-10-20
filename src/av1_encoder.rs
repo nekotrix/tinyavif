@@ -207,7 +207,7 @@ impl AV1Encoder {
     };
 
     tile.encode();
-    tile.dump_recon("recon.y4m").unwrap();
+    //tile.dump_recon("recon.y4m").unwrap();
     return tile.bitstream.finalize();
   }
 }
