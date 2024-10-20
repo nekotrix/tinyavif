@@ -1,12 +1,9 @@
 # Pathway toward an actual encoder
 
 * Figure out small (+/- 1 pixel value) discrepancies between encoder recon and avifdec output
+  * Might be a colour space issue - need to carefully check pipeline to check this
 
-* Hook up chroma transforms + coefficient encoding
-  * Requires implementing 4x4 forward and inverse transforms
-
-* Select transform-related CDFs based on qindex
-  * Move CDF definitions to a separate file
+* Figure out meaning of `hdlr` box, and stop pretending to be libavif
 
 # Comparisons
 
