@@ -123,8 +123,8 @@ pub fn pack_avif(av1_data: &[u8], crop_width: usize, crop_height: usize,
         let mut av1C = ipco.open_box(b"av1C");
         av1C.write_u8(0x81);       // Custom version field: 1 bit marker that must be 1 + 7-bit version = 1
         av1C.write_u8(0x1F);       // Profile 0, level 31 (== unconstrained)
-        av1C.write_u8(0b00001110); // Main tier, 8bpp, not monochrome, 4:2:0 subsampling, chroma located in top-left corner
-        av1C.write_u8(0x10);       // No presentation delay info
+        av1C.write_u8(0b00001100); // Main tier, 8bpp, not monochrome, 4:2:0 subsampling, chroma sample position unknown
+        av1C.write_u8(0x00);       // No presentation delay info
         drop(av1C);
 
         // Colour info box

@@ -134,7 +134,7 @@ impl AV1Encoder {
     w.write_bit(0); // Not monochrome, ie. we have chroma
     w.write_bit(0); // No colour info for now - we can put it in the AVIF headers later
     w.write_bit(0); // "TV" colour range
-    w.write_bits(2, 2); // Chroma co-located with top-left luma pixel - TODO check what default is for "real" images
+    w.write_bits(0, 2); // Unknown chroma sample position
     w.write_bit(0); // UV channels have shared delta-q values
   
     w.write_bit(0); // No film grain
