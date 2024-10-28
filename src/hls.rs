@@ -54,15 +54,16 @@ pub fn pack_avif(av1_data: &[u8], crop_width: usize, crop_height: usize,
   // Metadata box - contains the rest of the file header
   let mut meta = avif.open_box_with_version(b"meta", 0, 0);
   {
-    // "Handler" box - TODO figure out what this does
-    // TODO: Is this box needed? Can we put different values in here?
+    // "Handler" box
+    // Per libavif, this *must* be the first child of the "meta" box, and must have type "pict".
+    // Other than that, this contains a few fields which must be zero, and the name of the encoder
     let mut hdlr = meta.open_box_with_version(b"hdlr", 0, 0);
-    hdlr.write_u32(0);
+    hdlr.write_u32(0); // Must be zero
     hdlr.write_bytes(b"pict");
-    hdlr.write_u32(0);
-    hdlr.write_u32(0);
-    hdlr.write_u32(0);
-    hdlr.write_bytes(b"libavif\0"); // Pretend to be libavif for now
+    hdlr.write_u32(0); // Must be zero
+    hdlr.write_u32(0); // Must be zero
+    hdlr.write_u32(0); // Must be zero
+    hdlr.write_bytes(b"tinyavif\0");
     drop(hdlr);
 
     // "Primary item" box
@@ -128,7 +129,6 @@ pub fn pack_avif(av1_data: &[u8], crop_width: usize, crop_height: usize,
         drop(av1C);
 
         // Colour info box
-        // TODO: Decide what the colour settings should be
         let mut colr = ipco.open_box(b"colr");
         colr.write_bytes(b"nclx"); // Required subtype
         colr.write_u16(color_primaries);
