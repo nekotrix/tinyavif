@@ -57,7 +57,6 @@ pub fn compute_residual(source: &Array2D<u8>, pred: &Array2D<u8>,
 }
 
 // Quantize the coefficients in a given transform block
-// TODO: Figure out how to map qindex to q
 pub fn quantize(residual: &mut Array2D<i32>, qindex: u8) {
   let dc_q = qindex_to_dc_q[qindex as usize];
   let ac_q = qindex_to_ac_q[qindex as usize];

@@ -39,7 +39,6 @@ fn read_decimal<R: Read>(r: &mut R) -> Result<(usize, u8), io::Error> {
 
 // Read next character, expecting it to be whitespace
 // Returns the character if it's whitespace, panics if not
-// TODO: Return a Result type
 fn expect_whitespace<R: Read>(r: &mut R) -> Result<u8, io::Error> {
   let byte = r.read_u8()?;
   match byte {
@@ -81,7 +80,6 @@ impl<R: Read> Y4MReader<R> {
     let mut height = 0;
 
     // Parse parameter line
-    // TODO: Handle params other than width/height
     loop {
       match inner.read_u8()? {
         b'\n' => {

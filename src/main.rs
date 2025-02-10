@@ -1,7 +1,5 @@
 // Main executable
 
-// TODO: Standardize on (row, col) ordering for everything?
-
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_imports)]
@@ -39,22 +37,23 @@ use crate::y4m::Y4MReader;
 use clap::Parser;
 
 #[derive(Parser)]
+#[command(override_usage = "tinyavif <INPUT> [-o <OUTPUT>] [--qindex <QINDEX>]")]
 struct CommandlineArgs {
   /// Input file, must end in .y4m
   input: PathBuf,
-  /// Output file, must end in .obu or .avif
+  /// Output file, must end in .obu or .avif [default: <input>.avif]
   #[arg(short, long)]
   output: Option<PathBuf>,
-  /// Quantizer to use (TODO: Pick sensible default)
-  #[arg(short, long, default_value_t = 100)]
+  /// Quantizer to use. Valid range is 1-255, inclusive
+  #[arg(short, long, default_value_t = 35)]
   qindex: u8,
-  /// Color primaries, defaults to 2 (unspecified)
+  /// Color primaries
   #[arg(long, default_value_t = 2)]
   color_primaries: u16,
-  /// Transfer function, defaults to 2 (unspecified)
+  /// Transfer function
   #[arg(long, default_value_t = 2)]
   transfer_function: u16,
-  /// Matrix coefficients, defaults to 2 (unspecified)
+  /// Matrix coefficients
   #[arg(long, default_value_t = 2)]
   matrix_coefficients: u16,
 }

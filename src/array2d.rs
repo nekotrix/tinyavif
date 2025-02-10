@@ -9,7 +9,7 @@ pub struct Array2D<T> {
   rows: usize,
   cols: usize,
   stride: usize,
-  data: Box<[T]>, // TODO: Use a raw pointer to reduce overhead?
+  data: Box<[T]>,
 }
 
 impl<T> Array2D<T> {
@@ -106,8 +106,6 @@ impl<T: Zeroable + Copy> Array2D<T> {
 // This is done by having array[row] return a normal slice which
 // references the entire row in question. Then a normal slice index
 // can pick out the desired element
-// TODO: Change this to index with (usize, usize) directly,
-// and then extend to allow ranges in both arguments, returning a new Slice2D type
 impl<T> Index<usize> for Array2D<T> {
   type Output = [T];
   fn index(&self, index: usize) -> &[T] {

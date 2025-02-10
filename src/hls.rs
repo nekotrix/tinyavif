@@ -139,7 +139,7 @@ pub fn pack_avif(av1_data: &[u8], crop_width: usize, crop_height: usize,
       }
       drop(ipco);
 
-      // "Image property mapping association" box (TODO check name)
+      // "Image property mapping association" box
       let mut ipma = iprp.open_box_with_version(b"ipma", 0, 0);
       ipma.write_u32(1); // One item
 
