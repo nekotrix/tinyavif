@@ -327,6 +327,58 @@ impl<'a> TileEncoder<'a> {
     }
   }
 
+  fn encode_block(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
+    assert!(bsize == 8);
+
+    //println!("Encoding 8x8 block at mi_row={:3}, mi_col={:3}", mi_row, mi_col);
+
+    // Allocate a ModeInfo struct to hold information about the current block
+    let mut this_mi = ModeInfo::zeroed();
+
+    // For skip, the context depends on the above and left skip flags,
+    // defaulting to false if those aren't present
+    // As we always set skip = false, this context is always 0
+    // skip = false
+    self.bitstream.write_symbol(0, &skip_cdf);
+  
+    // For intra_frame_y_mode, the context depends on the above and left Y modes,
+    // defaulting to DC_PRED if those aren't present
+    // As we always choose DC_PRED, this context is always 0
+    // intra_frame_y_mode(context=0,0) = DC_PRED
+    self.bitstream.write_symbol(0, &y_mode_cdf);
+
+    // For uv_mode, the context is simply y_mode combined with whether CFL is allowed
+    // Here the y mode is always DC_PRED and CFL is always allowed for 8x8 blocks,
+    // so we always end up with the same context
+    // uv_mode(context=0, CFL allowed) = DC_PRED
+    self.bitstream.write_symbol(0, &uv_mode_cdf);
+
+    // Encode residuals
+    for plane in 0..3 {
+      let subsampling = if plane > 0 { 1 } else { 0 };
+      let y0 = (mi_row * 4) >> subsampling;
+      let x0 = (mi_col * 4) >> subsampling;
+      let h = bsize >> subsampling;
+      let w = bsize >> subsampling;
+
+      dc_predict(self.recon.plane_mut(plane).pixels_mut(), y0, x0, h, w);
+      let mut residual = compute_residual(self.source.plane(plane).pixels(),
+                                          self.recon.plane(plane).pixels(),
+                                          y0, x0, h, w);
+      quantize(&mut residual, self.base_qindex);
+
+      // Encode the quantized coefficients while we have them,
+      // before we consume them to finalize the reconstructed image
+      self.encode_coeffs(plane, mi_row, mi_col, bsize, &mut this_mi, &residual);
+
+      dequantize(&mut residual, self.base_qindex);
+      apply_residual(self.recon.plane_mut(plane).pixels_mut(), residual, y0, x0, h, w);
+    }
+
+    // Save mode info
+    self.mode_info.fill_region(mi_row, mi_col, bsize/4, bsize/4, &this_mi);
+  }
+
   fn encode_coeffs(&mut self, plane: usize, mi_row: usize, mi_col: usize, bsize: usize, this_mi: &mut ModeInfo,
                    coeffs: &Array2D<i32>) {
     if bsize != 8 {
@@ -595,58 +647,6 @@ impl<'a> TileEncoder<'a> {
         self.bitstream.write_golomb(unsigned_abs(coeff) - 15);
       }
     }
-  }
-
-  fn encode_block(&mut self, mi_row: usize, mi_col: usize, bsize: usize) {
-    assert!(bsize == 8);
-
-    //println!("Encoding 8x8 block at mi_row={:3}, mi_col={:3}", mi_row, mi_col);
-
-    // Allocate a ModeInfo struct to hold information about the current block
-    let mut this_mi = ModeInfo::zeroed();
-
-    // For skip, the context depends on the above and left skip flags,
-    // defaulting to false if those aren't present
-    // As we always set skip = false, this context is always 0
-    // skip = false
-    self.bitstream.write_symbol(0, &skip_cdf);
-  
-    // For intra_frame_y_mode, the context depends on the above and left Y modes,
-    // defaulting to DC_PRED if those aren't present
-    // As we always choose DC_PRED, this context is always 0
-    // intra_frame_y_mode(context=0,0) = DC_PRED
-    self.bitstream.write_symbol(0, &y_mode_cdf);
-
-    // For uv_mode, the context is simply y_mode combined with whether CFL is allowed
-    // Here the y mode is always DC_PRED and CFL is always allowed for 8x8 blocks,
-    // so we always end up with the same context
-    // uv_mode(context=0, CFL allowed) = DC_PRED
-    self.bitstream.write_symbol(0, &uv_mode_cdf);
-
-    // Encode residuals
-    for plane in 0..3 {
-      let subsampling = if plane > 0 { 1 } else { 0 };
-      let y0 = (mi_row * 4) >> subsampling;
-      let x0 = (mi_col * 4) >> subsampling;
-      let h = bsize >> subsampling;
-      let w = bsize >> subsampling;
-
-      dc_predict(self.recon.plane_mut(plane).pixels_mut(), y0, x0, h, w);
-      let mut residual = compute_residual(self.source.plane(plane).pixels(),
-                                          self.recon.plane(plane).pixels(),
-                                          y0, x0, h, w);
-      quantize(&mut residual, self.base_qindex);
-
-      // Encode the quantized coefficients while we have them,
-      // before we consume them to finalize the reconstructed image
-      self.encode_coeffs(plane, mi_row, mi_col, bsize, &mut this_mi, &residual);
-
-      dequantize(&mut residual, self.base_qindex);
-      apply_residual(self.recon.plane_mut(plane).pixels_mut(), residual, y0, x0, h, w);
-    }
-
-    // Save mode info
-    self.mode_info.fill_region(mi_row, mi_col, bsize/4, bsize/4, &this_mi);
   }
 
   fn dump_recon(&mut self, path: &str) -> Result<(), io::Error> {
