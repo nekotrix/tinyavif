@@ -1,3 +1,16 @@
+# Important
+
+This is not the main branch of tinyavif. This is a side branch
+intended to accompany part 1 of the blog post series.
+Everything which is not part of that post has been stripped out,
+so that it is easier to understand how the code relates to what
+is discussed in that post.
+
+In particular, this version of tinyavif **cannot take an input image**.
+All it can do is generate a fixed output file, which contains
+a 256x256 pixel grey square. This is because the focus of the post
+is to get the AVIF structure correct, not to act as a general encoder.
+
 # Tinyavif - the world's most minimal AV1 encoder
 
 Tinyavif is a proof-of-concept project to test how simple an AV1 encoder can be
@@ -21,22 +34,13 @@ Then to run, either copy this executable somewhere and run `tinyavif ARGS...`,
 or combine the two steps as `cargo run release -- ARGS...` (the `--` is
 required).
 
-Either way, the basic usage is:
+Either way, the basic usage is **stripped down to**:
 
-    tinyavif <INPUT> [-o <OUTPUT>] [--qindex <QINDEX>]
-
-The input file must be in the Y4M format, and must use 8 bits per pixel with
-4:2:0 downsampling (`yuv420p` format if using `ffmpeg` for conversion).
+    tinyavif [-o <OUTPUT>]
 
 The output file can be either a raw AV1 stream (filename ending in `.obu`) or
-an AVIF file (filename ending in `.avif`).
-
-`qindex` acts as the quality setting, and ranges from 1 (near-lossless) to 255
-(extremely low quality). The default is 35, which should be a decent starting
-point for high-quality encodes.
-
-If coming from other AV1 encoders which expect a `qp` value, start from
-`qindex = 4 * qp` and adjust from there.
+an AVIF file (filename ending in `.avif`). If no filename is provided, it
+defaults to `out.avif`.
 
 ## Colour spaces
 

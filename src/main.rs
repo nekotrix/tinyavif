@@ -17,20 +17,13 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-mod array2d;
 mod av1_encoder;
 mod bitcode;
 mod cdf;
-mod consts;
 mod entropycode;
-mod enums;
-mod frame;
 mod hls;
 mod isobmff;
-mod recon;
-mod txfm;
 mod util;
-mod y4m;
 
 use std::io::prelude::*;
 use std::fs::File;
@@ -39,21 +32,15 @@ use std::process::exit;
 
 use crate::av1_encoder::AV1Encoder;
 use crate::hls::*;
-use crate::y4m::Y4MReader;
 
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(override_usage = "tinyavif <INPUT> [-o <OUTPUT>] [--qindex <QINDEX>]")]
+#[command(override_usage = "tinyavif [-o <OUTPUT>]")]
 struct CommandlineArgs {
-  /// Input file, must end in .y4m
-  input: PathBuf,
   /// Output file, must end in .obu or .avif [default: <input>.avif]
   #[arg(short, long)]
   output: Option<PathBuf>,
-  /// Quantizer to use. Valid range is 1-255, inclusive
-  #[arg(short, long, default_value_t = 35)]
-  qindex: u8,
   /// Color primaries
   #[arg(long, default_value_t = 2)]
   color_primaries: u16,
@@ -68,24 +55,8 @@ struct CommandlineArgs {
 fn main() {
   let args = CommandlineArgs::parse();
 
-  let input_path = args.input;
-
-  match input_path.extension() {
-    None => {
-      println!("Error: Input file must end in .y4m");
-      exit(2);
-    },
-    Some(ext_osstr) => {
-      let ext = ext_osstr.to_str().unwrap();
-      if ext != "y4m" {
-        println!("Error: Input file must end in .y4m");
-        exit(2);
-      }
-    }
-  }
-
   let output_path = args.output.unwrap_or_else(|| {
-    input_path.with_extension("avif")
+    "out.avif".into()
   });
 
   let output_ext = match output_path.extension() {
@@ -103,19 +74,18 @@ fn main() {
     }
   };
 
-  let base_qindex = args.qindex;
+  // Use fixed output size and qindex. Not configurable in this version because
+  // the focus is on the AVIF file structure, not on encoding a specific image.
+  let base_qindex = 255;
 
-  let mut y4m = Y4MReader::new(File::open(input_path).unwrap()).unwrap();
-  let source = y4m.read_frame().unwrap();
-
-  let crop_width = source.y().crop_width();
-  let crop_height = source.y().crop_height();
+  let crop_width = 256;
+  let crop_height = 256;
 
   // Generate AV1 data
   let encoder = AV1Encoder::new(crop_width, crop_height);
   let sequence_header = encoder.generate_sequence_header();
   let frame_header = encoder.generate_frame_header(base_qindex, false);
-  let tile_data = encoder.encode_image(&source, base_qindex);
+  let tile_data = encoder.encode_image(crop_width, crop_height);
 
   // Pack into higher-level structure and write out
   let av1_data = pack_obus(&sequence_header, &frame_header, &tile_data, true);
