@@ -108,8 +108,17 @@ fn main() {
   let mut y4m = Y4MReader::new(File::open(input_path).unwrap()).unwrap();
   let source = y4m.read_frame().unwrap();
 
+  // Check that the image will fit in one tile
   let crop_width = source.y().crop_width();
   let crop_height = source.y().crop_height();
+  let padded_width = source.y().width();
+  let padded_height = source.y().height();
+
+  if padded_width > 4096 || padded_width * padded_height > 4096 * 2304 {
+    println!("Error: image size {}x{} (padded to {}x{}) is too large to fit in a single tile",
+             crop_width, crop_height, padded_width, padded_height);
+    exit(2);
+  }
 
   // Generate AV1 data
   let encoder = AV1Encoder::new(crop_width, crop_height);
