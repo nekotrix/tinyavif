@@ -102,8 +102,8 @@ impl Frame {
     let uv_crop_width = round2(y_crop_width, 1);
     let uv_crop_height = round2(y_crop_height, 1);
 
-    let uv_width = y_crop_width / 2;
-    let uv_height = y_crop_height / 2;
+    let uv_width = y_width / 2;
+    let uv_height = y_height / 2;
 
     Self {
       planes: [
